@@ -14,12 +14,12 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
 ARGS_DIR = os.path.join(os.getcwd(), 'arguments')
 
-NUM_TRAINING_VIDEOS = 100
-WATCH_DURATION = 30
+NUM_TRAINING_VIDEOS = 10
+WATCH_DURATION = 5
 USERNAME = os.getuid()
 
-PERCENTAGE_GROUPS = [5]
-PUPPETS_PER_GROUP = 10
+PERCENTAGE_GROUPS = [50]
+PUPPETS_PER_GROUP = 5
 
 
 def parse_args():
@@ -48,7 +48,50 @@ def parse_args():
         default="data/training/",
         help="Path to the training videos folder",
     )
-
+    # New arguments for intervention mode
+    parser.add_argument(
+        "--intervention",
+        action="store_true",
+        help="Run intervention experiments instead of training",
+    )  
+    parser.add_argument(
+        "--model-path",
+        default="/app/models/roberta_checkpoint",
+        help="Path to the RoBERTa model checkpoint inside container",
+    )
+    parser.add_argument(
+            "--intervention-types",
+            nargs="+",
+            default=["none", "downrank", "replace"],
+            choices=["none", "downrank", "replace"],
+            help="Intervention types to run",
+        )
+    parser.add_argument(
+    "--selection-type",
+    default="decay_weighted_random",
+    choices=["top", "random", "decay_weighted_random"],
+    help="Video selection strategy for intervention"
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=10,
+        help="Number of rounds per intervention experiment",
+    )
+    parser.add_argument(
+        "--harmful-percentages",
+        nargs="+",
+        type=int,
+        default=[5],
+        help="Harmful percentage groups to use",
+    )
+    parser.add_argument(
+        "--puppets-per-group",
+        type=int,
+        default=3,
+        help="Number of puppets per group to use",
+    )
+    
     args = parser.parse_args()
     return args, parser
 
@@ -64,7 +107,9 @@ def build_image():
 def get_mount_volumes():
     # binds "/output" on the container -> "OUTPUT_DIR" actual folder on disk
     # binds "/args" on the container -> "ARGS_DIR" actual folder on disk
-    return {OUTPUT_DIR: {"bind": "/output"}, LOGS_DIR: {"bind": "/logs"}}
+    return {OUTPUT_DIR: {"bind": "/output"}, LOGS_DIR: {"bind": "/logs"},
+            os.path.abspath("roberta/checkpoint"): {"bind": "/app/models/roberta_checkpoint"}}
+
 
 
 def max_containers_reached(client, max_containers):
@@ -119,6 +164,15 @@ def get_training_videos(harmful_pool, harmless_pool, harmful_percentage):
 def spawn_containers(args):
     # get docker client
     client = docker.from_env()
+    
+    # Select mode: training or intervention
+    if args.intervention:
+        spawn_intervention_containers(client, args)
+    else:
+        spawn_training_containers(client, args)
+
+
+def spawn_training_containers(client, args):
     # Load video pools
     harmful_pool, harmless_pool = load_video_pools(args)
 
@@ -171,7 +225,6 @@ def spawn_containers(args):
                 training=training,
                 # number of training videos
                 trainingN=NUM_TRAINING_VIDEOS,
-                # intervention=videos,
                 # seed video
                 testSeed=testSeed,
                 # steps to perform
@@ -194,6 +247,130 @@ def spawn_containers(args):
             # increment count of containers
             count += 1
         print("Total containers spawned:", count)
+
+def get_trained_puppets(harmful_percentages):
+    """Get list of trained puppet IDs by harmful percentage"""
+    puppet_dirs = {}
+    profiles_dir = os.path.join(OUTPUT_DIR, "profiles")
+    
+    if not os.path.exists(profiles_dir):
+        print(f"Error: Profiles directory not found: {profiles_dir}")
+        return puppet_dirs
+    
+    for percentage in harmful_percentages:
+        puppet_dirs[percentage] = []
+        
+        # Look for puppet profile directories matching the pattern
+        for dir_name in os.listdir(profiles_dir):
+            if dir_name.startswith(f"harmful_{percentage},"):
+                puppet_dirs[percentage].append(dir_name)
+    
+    # Report counts
+    for percentage, puppets in puppet_dirs.items():
+        print(f"Found {len(puppets)} trained puppets with {percentage}% harmful content")
+    
+    return puppet_dirs
+
+
+
+def validate_model_path(model_path):
+    host_model_path = "roberta/checkpoint"  # Adjust to your host path
+    if not os.path.exists(host_model_path):
+        raise FileNotFoundError(f"Model directory {host_model_path} does not exist on host")
+    print(f"Model directory {host_model_path} found on host")
+    
+    
+def spawn_intervention_containers(client, args):
+    """Spawn containers for intervention experiments"""
+    validate_model_path(args.model_path)
+    
+    # Find trained puppets by harmful percentage
+    trained_puppets = get_trained_puppets(args.harmful_percentages)
+    
+    if not any(trained_puppets.values()):
+        print("No trained puppets found! Please train sock puppets first.")
+        return
+    
+    # Calculate total experiments to run
+    total_experiments = 0
+    for percentage, puppets in trained_puppets.items():
+        num_puppets = min(len(puppets), args.puppets_per_group)
+        total_experiments += num_puppets * len(args.intervention_types)
+    
+    if total_experiments == 0:
+        print("No experiments to run.")
+        return
+    
+    print(f"Preparing to run {total_experiments} intervention experiments")
+    
+    # create required directories
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        
+    if not os.path.exists(LOGS_DIR):
+        os.makedirs(LOGS_DIR)
+    
+    # Run experiments
+    experiment_count = 0
+    
+    for percentage, puppet_ids in trained_puppets.items():
+        # Select up to puppets_per_group puppets
+        if args.puppets_per_group < len(puppet_ids):
+            selected_puppets = random.sample(puppet_ids, args.puppets_per_group)
+        else:
+            selected_puppets = puppet_ids
+        
+        for puppet_id in selected_puppets:
+            for intervention_type in args.intervention_types:
+                # Check for running container limit
+                while max_containers_reached(client, args.max_containers):
+                    print("Max containers reached. Sleeping...")
+                    sleep(args.sleep_duration)
+                
+                # Create experiment ID
+                experiment_id = f"{puppet_id}_{intervention_type}_{str(uuid4())[:8]}"
+                
+                # Puppet profile path (inside container)
+                profile_path = f"/output/profiles/{puppet_id}"
+                
+                # Prepare experiment arguments
+                experiment_args = {
+                    "puppetId": experiment_id,
+                    "profile_dir": profile_path,
+                    "outputDir": "/output",
+                    "duration": WATCH_DURATION,
+                    "description": f"Intervention experiment: {intervention_type}, ",
+                    "steps": "intervention",
+                    "intervention_type": intervention_type,
+                    "selection_type": args.selection_type,
+                    "rounds": args.rounds,
+                    "model_path": args.model_path,
+                    "harm_threshold": 0.8
+                }
+                
+                print(f"Starting experiment {experiment_count+1}/{total_experiments}: {experiment_id}")
+                
+                # Run container with sockpuppet.py (which will call intervention.py)
+                command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
+                
+                # Spawn container if it's not a simulation
+                if not args.simulate:
+                    container = client.containers.run(
+                        IMAGE_NAME,
+                        command,
+                        volumes=get_mount_volumes(),
+                        shm_size="1G",
+                        remove=True,
+                        detach=True
+                    )
+                
+                experiment_count += 1
+                sleep(3)  # Small delay between container launches
+    
+    print(f"Launched {experiment_count} intervention experiments")
+    print("Experiments are running in the background.")
+    print(f"Results will be saved in {OUTPUT_DIR}")
+
 
 
 def main():

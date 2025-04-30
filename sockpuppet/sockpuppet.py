@@ -179,44 +179,22 @@ def test():
         logger.exception(f"Error getting homepage after training: {e}")
 
 
-def trainWatch():
-    get_homepage()
-    add_action("Watch_start")
-    for videoId in args["intervention"]:
-        logger.info("Loading video:", videoId)
-        try:
-            video = Video(None, make_url(videoId))
-            watch(video, args["duration"])
-            logger.info("Video watched successfully")
-        except VideoUnavailableException:
-            logger.info(f"Skipping unavailable video: {videoId}")
-            continue  # Skip the current iteration and move to the next video
-        except Exception as e:
-            logger.exception(f"An unexpected error occurred while watching video {videoId}: {e}")
-            continue  # Optionally, continue with the next video in case of any other unexpected error
-
-        time.sleep(1)
-
-    add_action("Watch_end")
-
 
 def intervention():
-    get_homepage()
-    add_action("intervention_start")
-    for videoId in args["intervention"]:
-        logger.info("Loading video:", videoId)
-        try:
-            video = Video(None, make_url(videoId))
-            watch(video, args["duration"])
-            logger.info("Video watched successfully")
-        except VideoUnavailableException:
-            logger.info(f"Skipping unavailable video: {videoId}")
-            continue  # Skip the current iteration and move to the next video
-        except Exception as e:
-            logger.exception(f"An unexpected error occurred while watching video {videoId}: {e}")
-            continue  # Optionally, continue with the next video in case of any other unexpected error
-
-    add_action("intervention_end")
+    try:
+        if "intervention_type" in args:
+            logger.info("Starting recommendation intervention experiment")
+            add_action(puppet, "intervention_start")
+           
+            from intervention import run_intervention
+            
+            # Run the intervention experiment
+            run_intervention(args, puppet=puppet, logger=logger)
+            
+            logger.info("Recommendation intervention experiment completed")
+    except Exception as e:
+        logger.exception(f"Error in intervention step: {e}")
+        raise
 
 
 def search_and_watch():

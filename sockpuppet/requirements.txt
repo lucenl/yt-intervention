@@ -1,0 +1,10 @@
+yt-dlp
+torch
+transformers
+datasets
+pandas
+matplotlib
+seaborn
+numpy
+scipy
+tqdm
