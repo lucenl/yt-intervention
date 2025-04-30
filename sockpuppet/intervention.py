@@ -38,9 +38,11 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger(__name__)
     
+    logger.info(f"Puppet at start of run_intervention: {puppet}")
+    
     # Extract parameters
     puppet_id = args["puppetId"]
-    output_dir = args["outputDir"]
+    output_dir = args.get("outputDir", "/output")
     model_path = args.get("model_path", "/app/models/roberta_checkpoint")
     intervention_type = args.get("intervention_type", "none")
     selection_type = args.get("selection_type", "decay_weighted_random") 
@@ -73,7 +75,6 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     
     # Initialize puppet if not provided
     if puppet is None:
-        # In standalone mode, we need profile_dir to initialize the driver
         profile_dir = args.get("profile_dir")
         if not profile_dir:
             raise KeyError("profile_dir is required in args when puppet is not provided")
@@ -91,6 +92,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
         # Create harmless reservoir for replacement strategy
         harmless_reservoir = [] if intervention_type == 'replace' else None
         
+        logger.info(f"Puppet before first add_action: {puppet}")
         # Add start action
         add_action(puppet, "intervention_start")
         

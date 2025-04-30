@@ -5,13 +5,6 @@ import json
 import time
 from datetime import datetime
 import os
-# from random import choice
-# import pandas as pd
-import time
-# import random
-
-puppet = {}
-
 
 def init_puppet(puppetId, profile_dir):
     """
@@ -21,7 +14,6 @@ def init_puppet(puppetId, profile_dir):
     3. Empty actions list to track what happens
     4. Start time to track duration
     """
-    global puppet
     puppet = dict(
         driver=YTDriver(
             profile_dir=profile_dir, use_virtual_display=True
@@ -32,47 +24,50 @@ def init_puppet(puppetId, profile_dir):
     )
     return puppet
 
-
 def makedir(outputDir, d):
     dir = os.path.join(outputDir, d)
     if not os.path.exists(dir):
         os.makedirs(dir)
     return dir
 
-
 def make_url(videoId):
     return "https://youtube.com/watch?v=" + str(videoId)
 
+def add_action(puppet, action, params=None):
+    """
+    Add an action to the puppet's action log
+    
+    Args:
+        puppet: Puppet dictionary
+        action: Name of the action
+        params: Optional parameters for the action
+    """
+    logger.info(f"Action: {action}, Params: {params}")
+    puppet["actions"].append({
+        "action": action,
+        "params": params,
+        "timestamp": datetime.now().isoformat()
+    })
 
-def add_action(action, params=None):
-    # Records every action the puppet takes with timestamp
-    logger.info(action, params)
-    puppet["actions"].append(dict(action=action, params=params))
-
-
-def get_homepage():
+def get_homepage(puppet):
     homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-    add_action("get_homepage_recommendations", [vid.videoId for vid in homepage])
+    add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
     return homepage
 
-
-def get_recommendations():
+def get_recommendations(puppet):
     recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
-    add_action("get_upnext_recommendations", [vid.videoId for vid in recommendations])
+    add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in recommendations])
     return recommendations
 
-
-def watch(video: Video, duration):
+def watch(puppet, video: Video, duration):
     driver = puppet["driver"]
     try:
         driver.play(video, duration=duration)
     except VideoUnavailableException as e:
         logger.info("Skipping unavailable video")
-        # pass
-    add_action("watch", video.videoId)
+    add_action(puppet, "watch", video.videoId)
 
-
-def save_puppet():
+def save_puppet(puppet, args):
     js = dict(
         puppet_id=puppet["puppetId"],
         start_time=puppet["start_time"],
@@ -81,39 +76,34 @@ def save_puppet():
         description=puppet["description"],
         actions=puppet["actions"],
         args=args,
+        harmful_exposure=puppet.get("harmful_exposure", [])
     )
     with open(os.path.join(makedir(args["outputDir"], "puppets"), puppet["puppetId"]), "w") as f:
         json.dump(js, f, default=str, indent=4)
 
+def train(puppet, args):
+    logger.info(f"Puppet state at start of train: {puppet}")
+    get_homepage(puppet)
+    add_action(puppet, "training_start")
 
-def train():
-    get_homepage()
-    add_action("training_start")
-
-    # Create screenshots directory
     screenshots_dir = os.path.join(args['outputDir'], 'screenshots', args['puppetId'])
     if not os.path.exists(screenshots_dir):
         os.makedirs(screenshots_dir)
 
-    # get list of videoIds
     training = args["training"]
     logger.info("Training videos:\n%s", "\n".join(f"  {vid}" for vid in training))
     training_videos = [videoId for videoId in training if len(videoId) > 0]
     trainingN = int(args["trainingN"])
-    # number of videos watched
     watched = 0
-
     last_video = None
+
     for videoId in training_videos:
         logger.info(f"Loading video: {videoId}")
-        # watch until N videos have been watched
         if watched >= trainingN:
             break
-
-        # Watch the video
         try:
             video = Video(None, make_url(videoId))
-            watch(video, args["duration"])
+            watch(puppet, video, args["duration"])
             last_video = video
             watched += 1
         except VideoUnavailableException:
@@ -121,43 +111,41 @@ def train():
         except Exception as e:
             logger.exception(e)
 
-    add_action("training_end")
+    add_action(puppet, "training_end")
 
-    """ Get upnext recommendations after training """
     if last_video is not None:
         retry_upnext = 0
-        # Take screenshot before getting recommendations
         puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"last_video_before_recs.png"))
         up_next = puppet["driver"].get_upnext_recommendations(topn=12)
-        add_action("get_upnext_recommendations", [vid.videoId for vid in up_next])
+        add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in up_next])
     else:
         raise Exception("No video to get recommendations from {videoId}.")
 
-    """ Get homepage recommendations after training """
     homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-    # Take screenshot after first attempt
     puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"homepage_first_attempt.png"))
-    add_action("get_homepage_recommendations", [vid.videoId for vid in homepage])
+    add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
+    logger.info(f"Puppet state at end of train: {puppet}")
 
-
-
-def intervention(initial_upnext=None, initial_homepage=None):
+def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
     try:
         if "intervention_type" in args:
             logger.info("Starting recommendation intervention experiment")
-            add_action("intervention_start")
+            logger.info(f"Puppet state before intervention start: {puppet}")
+            add_action(puppet, "intervention_start")
             from intervention import run_intervention
-            run_intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage, logger=logger)
+            logger.info(f"Puppet state before run_intervention: {puppet}")
+            # Fix: Swap the arguments to match run_intervention(args, puppet, ...)
+            run_intervention(args, puppet, logger=logger, initial_upnext=initial_upnext, initial_homepage=initial_homepage)
             logger.info("Recommendation intervention experiment completed")
     except Exception as e:
         logger.exception(f"Error in intervention step: {e}")
         raise
 
-def extract_recommendations():
+def extract_recommendations(puppet):
+    logger.info(f"Puppet state in extract_recommendations: {puppet}")
     upnext_recommendations = []
     homepage_recommendations = []
     
-    # Extract the last occurrence of each recommendation type from actions
     for action in reversed(puppet["actions"]):
         if action["action"] == "get_upnext_recommendations" and not upnext_recommendations:
             upnext_recommendations = action["params"] or []
@@ -166,7 +154,6 @@ def extract_recommendations():
         if upnext_recommendations and homepage_recommendations:
             break
     
-    # Trim recommendations as per your requirement
     upnext_recommendations = upnext_recommendations[:12]
     homepage_recommendations = homepage_recommendations[:25]
     
@@ -174,6 +161,8 @@ def extract_recommendations():
 
 if __name__ == "__main__":
     args = json.loads(sys.argv[1])
+    if "outputDir" not in args:
+        args["outputDir"] = "/output"
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}', level=logging.INFO, filemode='w')
     logger = logging.getLogger(__name__)
 
@@ -181,28 +170,30 @@ if __name__ == "__main__":
         profile_dir = os.path.join(makedir(args["outputDir"], "profiles"), args["puppetId"])
         logger.info(f"Creating profile directory: {profile_dir}")
         logger.info("Successfully created profile directory")
-        init_puppet(args["puppetId"], profile_dir)
-        logger.info("Initialized sock puppet:", args["puppetId"])
+        puppet = init_puppet(args["puppetId"], profile_dir)
+        logger.info("Initialized sock puppet: %s", args["puppetId"])
+        logger.info(f"Puppet state after init: {puppet}")
 
         steps = args["steps"]
         logger.info(f"Executing step: {steps}")
         if steps == "train":
-            train()
+            train(puppet, args)
         elif steps == "intervention":
-            intervention()
+            intervention(puppet, args)
         elif steps == "combined":
-            train()
-            initial_upnext, initial_homepage = extract_recommendations()
-            intervention(initial_upnext=initial_upnext, initial_homepage=initial_homepage)
+            train(puppet, args)
+            initial_upnext, initial_homepage = extract_recommendations(puppet)
+            intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage)
         else:
             logger.error(f"Invalid step: {steps}")
             sys.exit(1)
 
-        puppet["driver"].close()
         puppet["steps"] = args["steps"]
         puppet["duration"] = args["duration"]
         puppet["description"] = args["description"]
-        save_puppet()
+        logger.info(f"Puppet state before save: {puppet}")
+        save_puppet(puppet, args)
+        puppet["driver"].close()
         logger.info('sock puppet finished')
     except Exception as e:
         logger.exception(e)
