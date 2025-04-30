@@ -23,7 +23,6 @@ def init_puppet(puppetId, profile_dir):
     """
     global puppet
     puppet = dict(
-        # driver=YTDriver(verbose=True, profile_dir=profile_dir),#, use_virtual_display=True),
         driver=YTDriver(
             profile_dir=profile_dir, use_virtual_display=True
         ),
@@ -141,98 +140,64 @@ def train():
     add_action("get_homepage_recommendations", [vid.videoId for vid in homepage])
 
 
-def test():
-    add_action("testing_start")
-    get_homepage()
-    # video = Video(None, make_url(args['testSeed']))
-    # watch(video, 0)
-    # get_recommendations()
-    # for _ in range(20):
-    #     watch(video, 0)
-    #     r = get_recommendations()
-    #     video = r[0]
-    add_action("testing_end")
 
-    # If we've watched any videos, use the last one for recommendations
-    last_video_id = args["testSeed"]
-    if last_video_id:
-        add_action("testing_start", last_video_id)
-
-        # Get recommendations based on the last video
-        try:
-            # Ensure we're still on the last video's page
-            video = Video(None, make_url(last_video_id))
-            # Don't need to watch again, just get recommendations
-            recommendations = get_recommendations()
-            add_action(
-                "training_video_recommendations",
-                [vid.videoId for vid in recommendations],
-            )
-        except Exception as e:
-            logger.exception(f"Error getting recommendations for last video: {e}")
-
-    # Now get homepage recommendations (as a separate step)
-    try:
-        homepage_videos = get_homepage()
-        add_action("post_training_homepage", [vid.videoId for vid in homepage_videos])
-    except Exception as e:
-        logger.exception(f"Error getting homepage after training: {e}")
-
-
-
-def intervention():
+def intervention(initial_upnext=None, initial_homepage=None):
     try:
         if "intervention_type" in args:
             logger.info("Starting recommendation intervention experiment")
-            add_action(puppet, "intervention_start")
-           
+            add_action("intervention_start")
             from intervention import run_intervention
-            
-            # Run the intervention experiment
-            run_intervention(args, puppet=puppet, logger=logger)
-            
+            run_intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage, logger=logger)
             logger.info("Recommendation intervention experiment completed")
     except Exception as e:
         logger.exception(f"Error in intervention step: {e}")
         raise
 
-
-def search_and_watch():
-    search_term = "fashion tips"  # Since we can't pass this as an attribute
-    top_n = 10  # number of top videos to watch
-
-    videos = puppet["driver"].search_videos(query=search_term)
-
-    top_videos = videos[:top_n]  # Assuming search_videos returns a sorted list
-
-    # Store these videos in an intervention-like attribute for consistency
-    puppet["interventionVideos"] = [video.url for video in top_videos]
-
-    for video in top_videos:
-        logger.info(f"Watching video: {video.url}")
-        watch(video, args["duration"])
-
-    # Additional logic for taking a screenshot, etc., would follow here
-
+def extract_recommendations():
+    upnext_recommendations = []
+    homepage_recommendations = []
+    
+    # Extract the last occurrence of each recommendation type from actions
+    for action in reversed(puppet["actions"]):
+        if action["action"] == "get_upnext_recommendations" and not upnext_recommendations:
+            upnext_recommendations = action["params"] or []
+        elif action["action"] == "get_homepage_recommendations" and not homepage_recommendations:
+            homepage_recommendations = action["params"] or []
+        if upnext_recommendations and homepage_recommendations:
+            break
+    
+    # Trim recommendations as per your requirement
+    upnext_recommendations = upnext_recommendations[:12]
+    homepage_recommendations = homepage_recommendations[:25]
+    
+    return upnext_recommendations, homepage_recommendations
 
 if __name__ == "__main__":
-    # time.sleep(random.uniform(0, 3))
     args = json.loads(sys.argv[1])
-
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}', level=logging.INFO, filemode='w')
     logger = logging.getLogger(__name__)
 
     try:
-        # conduct end-to-end experiment
         profile_dir = os.path.join(makedir(args["outputDir"], "profiles"), args["puppetId"])
         logger.info(f"Creating profile directory: {profile_dir}")
         logger.info("Successfully created profile directory")
         init_puppet(args["puppetId"], profile_dir)
         logger.info("Initialized sock puppet:", args["puppetId"])
 
-        train()
+        steps = args["steps"]
+        logger.info(f"Executing step: {steps}")
+        if steps == "train":
+            train()
+        elif steps == "intervention":
+            intervention()
+        elif steps == "combined":
+            train()
+            initial_upnext, initial_homepage = extract_recommendations()
+            intervention(initial_upnext=initial_upnext, initial_homepage=initial_homepage)
+        else:
+            logger.error(f"Invalid step: {steps}")
+            sys.exit(1)
 
-        # finalize puppet
         puppet["driver"].close()
         puppet["steps"] = args["steps"]
         puppet["duration"] = args["duration"]
@@ -241,7 +206,3 @@ if __name__ == "__main__":
         logger.info('sock puppet finished')
     except Exception as e:
         logger.exception(e)
-        # puppet['steps'] = args['steps']
-        # puppet['duration'] = args['duration']
-        # puppet['description'] = args['description']
-        # save_puppet()

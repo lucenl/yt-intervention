@@ -19,7 +19,7 @@ import seaborn as sns
 from metadata_extractor import MetadataExtractor
 from roberta_classifier import RoBERTaClassifier
 
-def run_intervention(args, puppet=None, logger=None):
+def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initial_homepage=None):
     """
     Run intervention experiment
     
@@ -27,7 +27,9 @@ def run_intervention(args, puppet=None, logger=None):
         args: Arguments dictionary including model path, rounds, etc.
         puppet: Optional puppet object if called from sockpuppet.py
         logger: Optional logger
-        
+        initial_upnext: List of upnext recommendation video IDs from training (optional)
+        initial_homepage: List of homepage recommendation video IDs from training (optional)
+    
     Returns:
         Puppet object with experiment results
     """
@@ -38,7 +40,6 @@ def run_intervention(args, puppet=None, logger=None):
     
     # Extract parameters
     puppet_id = args["puppetId"]
-    profile_dir = args["profile_dir"]
     output_dir = args["outputDir"]
     model_path = args.get("model_path", "/app/models/roberta_checkpoint")
     intervention_type = args.get("intervention_type", "none")
@@ -72,6 +73,10 @@ def run_intervention(args, puppet=None, logger=None):
     
     # Initialize puppet if not provided
     if puppet is None:
+        # In standalone mode, we need profile_dir to initialize the driver
+        profile_dir = args.get("profile_dir")
+        if not profile_dir:
+            raise KeyError("profile_dir is required in args when puppet is not provided")
         from ytdriver import YTDriver
         puppet = {
             "puppetId": puppet_id,
@@ -89,16 +94,27 @@ def run_intervention(args, puppet=None, logger=None):
         # Add start action
         add_action(puppet, "intervention_start")
         
+        # Convert initial recommendations to Video objects if provided
+        current_homepage = None
+        if initial_homepage:
+            current_homepage = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_homepage]
+            add_action(puppet, "using_initial_homepage_recommendations", initial_homepage)
+        if initial_upnext and not current_homepage:
+            current_homepage = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_upnext]
+            add_action(puppet, "using_initial_upnext_recommendations", initial_upnext)
+        
         # Run intervention rounds
         for round_num in range(1, num_rounds + 1):
             logger.info(f"Starting round {round_num}")
             
-            # Get homepage recommendations
-            homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-            logger.info(f"Got {len(homepage)} homepage recommendations")
-            
-            # Add action
-            add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
+            # Get homepage recommendations if not using initial ones
+            if round_num == 1 and current_homepage:
+                homepage = current_homepage
+                logger.info(f"Using initial recommendations: {len(homepage)} videos")
+            else:
+                homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+                logger.info(f"Got {len(homepage)} homepage recommendations")
+                add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
             
             # Extract video IDs
             video_ids = [video.videoId for video in homepage]
@@ -150,6 +166,15 @@ def run_intervention(args, puppet=None, logger=None):
                 harm_scores = [0.0] * len(homepage)
             
             # Select video to watch
+            if not modified_homepage:
+                logger.warning("No videos available to select. Skipping round.")
+                puppet["harmful_exposure"].append({
+                    "round": round_num,
+                    "homepage_harmful_percentage": 0.0,
+                    "sidebar_harmful_percentage": 0.0
+                })
+                continue
+                
             if selection_type == 'decay_weighted_random':
                 # Position-based weighting
                 decay_factor = 0.9
@@ -220,6 +245,10 @@ def run_intervention(args, puppet=None, logger=None):
                     "selected_video": selected_video.videoId
                 }
                 
+                # Update current homepage for the next round
+                current_homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+                add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in current_homepage])
+                
             except Exception as e:
                 logger.error(f"Error watching video: {e}")
                 round_result = {
@@ -266,7 +295,6 @@ def run_intervention(args, puppet=None, logger=None):
         
         return puppet
 
-
 def add_action(puppet, action, params=None):
     """
     Add an action to the puppet's action log
@@ -281,7 +309,6 @@ def add_action(puppet, action, params=None):
         "params": params,
         "timestamp": datetime.now().isoformat()
     })
-
 
 def save_recommendations_to_csv(puppet_id, round_num, source, recommendations, output_dir):
     """
@@ -315,7 +342,6 @@ def save_recommendations_to_csv(puppet_id, round_num, source, recommendations, o
     df = pd.DataFrame(data)
     df.to_csv(csv_path, index=False)
 
-
 def save_results(puppet, output_dir):
     """
     Save experiment results to a JSON file
@@ -324,18 +350,14 @@ def save_results(puppet, output_dir):
         puppet: Puppet dictionary with experiment results
         output_dir: Directory to save the results
     """
-    # Create a copy without the driver object
+    os.makedirs(output_dir, exist_ok=True)
     results = {k: v for k, v in puppet.items() if k != 'driver'}
-    
-    # Save to file
     results_path = os.path.join(
         output_dir, 
         f"{puppet['puppetId']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     )
-    
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2, default=str)
-
 
 def generate_visualization(puppet, output_dir):
     """
@@ -345,46 +367,28 @@ def generate_visualization(puppet, output_dir):
         puppet: Puppet dictionary with experiment results
         output_dir: Directory to save the visualization
     """
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Extract data
     exposure_data = puppet.get('harmful_exposure', [])
-    
     if not exposure_data:
         return
-        
     rounds = [d.get('round', i+1) for i, d in enumerate(exposure_data)]
     homepage_harmful = [d.get('homepage_harmful_percentage', 0) for d in exposure_data]
     sidebar_harmful = [d.get('sidebar_harmful_percentage', 0) for d in exposure_data 
                      if d.get('sidebar_harmful_percentage') is not None]
-    
-    # Create plot
     plt.figure(figsize=(10, 6))
-    
-    # Plot homepage harmful
     plt.plot(rounds, homepage_harmful, 'b-o', linewidth=2, label='Homepage')
-    
-    # Plot sidebar only up to the number of valid entries
     if sidebar_harmful:
         sidebar_rounds = rounds[:len(sidebar_harmful)]
         plt.plot(sidebar_rounds, sidebar_harmful, 'r-o', linewidth=2, label='Sidebar')
-    
-    # Add labels and legend
     plt.title(f"Harmful Content Exposure - {puppet['puppetId']}", fontsize=14)
     plt.xlabel('Round', fontsize=12)
     plt.ylabel('Harmful Content (%)', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
-    
-    # Save figure
     plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_exposure.png"), dpi=300, bbox_inches='tight')
 
-
-# Entry point when run directly
 if __name__ == "__main__":
     import argparse
-    
     parser = argparse.ArgumentParser(description="Run YouTube recommendation intervention")
     parser.add_argument("--puppet-id", required=True, help="Puppet ID")
     parser.add_argument("--profile-dir", required=True, help="Path to puppet profile directory")
@@ -398,10 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--rounds", type=int, default=10, help="Number of rounds")
     parser.add_argument("--duration", type=int, default=30, help="Video watch duration (seconds)")
     parser.add_argument("--harm-threshold", type=float, default=0.5, help="Harm classification threshold")
-    
     args = parser.parse_args()
-    
-    # Convert args to dictionary
     args_dict = {
         "puppetId": args.puppet_id,
         "profile_dir": args.profile_dir,
@@ -412,8 +413,6 @@ if __name__ == "__main__":
         "rounds": args.rounds,
         "duration": args.duration,
         "harm_threshold": args.harm_threshold,
-        "standalone": True  # Flag that this was run directly, not from sockpuppet.py
+        "standalone": True
     }
-    
-    # Run intervention
     run_intervention(args_dict)

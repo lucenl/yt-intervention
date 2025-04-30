@@ -41,4 +41,4 @@ RUN pip install yt-dlp
 COPY sockpuppet.py ./
 COPY intervention.py ./
 COPY metadata_extractor.py ./
-COPY 
+COPY roberta_classifier.py ./
