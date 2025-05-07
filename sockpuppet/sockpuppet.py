@@ -13,6 +13,8 @@ def init_puppet(puppetId, profile_dir):
     2. A unique ID
     3. Empty actions list to track what happens
     4. Start time to track duration
+    5. Empty rounds list to track intervention rounds
+    6. Empty harmful_exposure list to track harmful content exposure
     """
     puppet = dict(
         driver=YTDriver(
@@ -21,6 +23,31 @@ def init_puppet(puppetId, profile_dir):
         puppetId=puppetId,
         actions=[],
         start_time=datetime.now(),
+        rounds=[],
+        harmful_exposure=[]  # Added this line
+    )
+    return puppet
+
+def load_puppet(puppetId, args):
+    """
+    Load a saved puppet state from file.
+    """
+    puppet_file = os.path.join(args["outputDir"], "puppets", puppetId)
+    if not os.path.exists(puppet_file):
+        raise FileNotFoundError(f"Puppet file {puppet_file} not found")
+    
+    with open(puppet_file, "r") as f:
+        puppet_data = json.load(f)
+    
+    # Reinitialize the driver
+    profile_dir = os.path.join(args["outputDir"], "profiles", puppetId)
+    puppet = dict(
+        driver=YTDriver(profile_dir=profile_dir, use_virtual_display=True),
+        puppetId=puppet_data["puppet_id"],
+        actions=puppet_data["actions"],
+        start_time=datetime.strptime(puppet_data["start_time"], "%Y-%m-%d %H:%M:%S.%f"),
+        rounds=puppet_data.get("rounds", []),
+        harmful_exposure=puppet_data.get("harmful_exposure", [])  # Added this line
     )
     return puppet
 
@@ -75,6 +102,7 @@ def save_puppet(puppet, args):
         duration=puppet["duration"],
         description=puppet["description"],
         actions=puppet["actions"],
+        rounds=puppet["rounds"],
         args=args,
         harmful_exposure=puppet.get("harmful_exposure", [])
     )
@@ -134,8 +162,8 @@ def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
             add_action(puppet, "intervention_start")
             from intervention import run_intervention
             logger.info(f"Puppet state before run_intervention: {puppet}")
-            # Fix: Swap the arguments to match run_intervention(args, puppet, ...)
-            run_intervention(args, puppet, logger=logger, initial_upnext=initial_upnext, initial_homepage=initial_homepage)
+            focus = args.get("focus", "homepage") # Default to homepage if not specified  
+            run_intervention(args, puppet, logger=logger, initial_upnext=initial_upnext, initial_homepage=initial_homepage, focus=focus)
             logger.info("Recommendation intervention experiment completed")
     except Exception as e:
         logger.exception(f"Error in intervention step: {e}")
@@ -170,17 +198,27 @@ if __name__ == "__main__":
         profile_dir = os.path.join(makedir(args["outputDir"], "profiles"), args["puppetId"])
         logger.info(f"Creating profile directory: {profile_dir}")
         logger.info("Successfully created profile directory")
-        puppet = init_puppet(args["puppetId"], profile_dir)
-        logger.info("Initialized sock puppet: %s", args["puppetId"])
-        logger.info(f"Puppet state after init: {puppet}")
 
         steps = args["steps"]
         logger.info(f"Executing step: {steps}")
+
         if steps == "train":
+            puppet = init_puppet(args["puppetId"], profile_dir)
+            logger.info("Initialized sock puppet: %s", args["puppetId"])
+            logger.info(f"Puppet state after init: {puppet}")
             train(puppet, args)
         elif steps == "intervention":
-            intervention(puppet, args)
+            # Load the saved puppet state
+            puppet = load_puppet(args["puppetId"], args)
+            logger.info("Loaded sock puppet: %s", args["puppetId"])
+            logger.info(f"Puppet state after load: {puppet}")
+            # Extract initial recommendations
+            initial_upnext, initial_homepage = extract_recommendations(puppet)
+            intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage)
         elif steps == "combined":
+            puppet = init_puppet(args["puppetId"], profile_dir)
+            logger.info("Initialized sock puppet: %s", args["puppetId"])
+            logger.info(f"Puppet state after init: {puppet}")
             train(puppet, args)
             initial_upnext, initial_homepage = extract_recommendations(puppet)
             intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage)

@@ -14,12 +14,12 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
 ARGS_DIR = os.path.join(os.getcwd(), 'arguments')
 
-NUM_TRAINING_VIDEOS = 10
+NUM_TRAINING_VIDEOS = 5
 WATCH_DURATION = 5
 USERNAME = os.getuid()
 
 PERCENTAGE_GROUPS = [50]
-PUPPETS_PER_GROUP = 5
+PUPPETS_PER_GROUP = 1
 
 
 def parse_args():
