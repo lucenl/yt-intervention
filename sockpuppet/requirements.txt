@@ -8,3 +8,4 @@ seaborn
 numpy
 scipy
 tqdm
+accelerate>=0.26.0
