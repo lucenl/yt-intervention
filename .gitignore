@@ -1,0 +1,10 @@
+# build artifacts
+dist/
+out/
+
+# log files
+*.log
+
+logs/
+output/
+
