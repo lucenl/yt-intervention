@@ -24,7 +24,7 @@ def init_puppet(puppetId, profile_dir):
         actions=[],
         start_time=datetime.now(),
         rounds=[],
-        harmful_exposure=[]  # Added this line
+        harmful_exposure=[]
     )
     return puppet
 
@@ -47,7 +47,7 @@ def load_puppet(puppetId, args):
         actions=puppet_data["actions"],
         start_time=datetime.strptime(puppet_data["start_time"], "%Y-%m-%d %H:%M:%S.%f"),
         rounds=puppet_data.get("rounds", []),
-        harmful_exposure=puppet_data.get("harmful_exposure", [])  # Added this line
+        harmful_exposure=puppet_data.get("harmful_exposure", [])
     )
     return puppet
 
@@ -118,8 +118,12 @@ def train(puppet, args):
     if not os.path.exists(screenshots_dir):
         os.makedirs(screenshots_dir)
 
-    training = args["training"]
-    logger.info("Training videos:\n%s", "\n".join(f"  {vid}" for vid in training))
+    training = args.get("training", [])
+    logger.info("Training videos received: %s", training)
+    if not training:
+        logger.warning("No training videos provided. Training phase will be skipped.")
+        return
+
     training_videos = [videoId for videoId in training if len(videoId) > 0]
     trainingN = int(args["trainingN"])
     watched = 0
@@ -143,14 +147,16 @@ def train(puppet, args):
 
     if last_video is not None:
         retry_upnext = 0
-        puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"last_video_before_recs.png"))
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"last_video_before_recs_{timestamp}.png"))
         up_next = puppet["driver"].get_upnext_recommendations(topn=12)
         add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in up_next])
     else:
-        raise Exception("No video to get recommendations from {videoId}.")
+        raise Exception("No video to get recommendations from.")
 
     homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-    puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"homepage_first_attempt.png"))
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"homepage_first_attempt_{timestamp}.png"))
     add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
     logger.info(f"Puppet state at end of train: {puppet}")
 
@@ -162,7 +168,7 @@ def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
             add_action(puppet, "intervention_start")
             from intervention import run_intervention
             logger.info(f"Puppet state before run_intervention: {puppet}")
-            focus = args.get("focus", "homepage") # Default to homepage if not specified  
+            focus = args.get("focus", "homepage")
             run_intervention(args, puppet, logger=logger, initial_upnext=initial_upnext, initial_homepage=initial_homepage, focus=focus)
             logger.info("Recommendation intervention experiment completed")
     except Exception as e:
@@ -191,7 +197,8 @@ if __name__ == "__main__":
     args = json.loads(sys.argv[1])
     if "outputDir" not in args:
         args["outputDir"] = "/output"
-    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}', level=logging.INFO, filemode='w')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}_{timestamp}.log', level=logging.INFO, filemode='w')
     logger = logging.getLogger(__name__)
 
     try:
@@ -208,11 +215,9 @@ if __name__ == "__main__":
             logger.info(f"Puppet state after init: {puppet}")
             train(puppet, args)
         elif steps == "intervention":
-            # Load the saved puppet state
             puppet = load_puppet(args["puppetId"], args)
             logger.info("Loaded sock puppet: %s", args["puppetId"])
             logger.info(f"Puppet state after load: {puppet}")
-            # Extract initial recommendations
             initial_upnext, initial_homepage = extract_recommendations(puppet)
             intervention(puppet, args, initial_upnext=initial_upnext, initial_homepage=initial_homepage)
         elif steps == "combined":

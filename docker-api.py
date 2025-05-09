@@ -8,7 +8,7 @@ from uuid import uuid4
 import json
 import random
 
-# change this to your own ID
+# Change this to your own ID
 IMAGE_NAME = "lucen/youtube-sock-puppet"
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
@@ -20,7 +20,6 @@ USERNAME = os.getuid()
 
 PERCENTAGE_GROUPS = [50]
 PUPPETS_PER_GROUP = 1
-
 
 def parse_args():
     parser = ArgumentParser()
@@ -95,22 +94,13 @@ def parse_args():
     args = parser.parse_args()
     return args, parser
 
-
 def build_image():
-    # get docker client and build image
     client = docker.from_env()
-
-    # build the image from the Dockerfile
     client.images.build(path="./sockpuppet", tag=IMAGE_NAME, rm=True)
-    
 
 def get_mount_volumes():
-    # binds "/output" on the container -> "OUTPUT_DIR" actual folder on disk
-    # binds "/args" on the container -> "ARGS_DIR" actual folder on disk
     return {OUTPUT_DIR: {"bind": "/output"}, LOGS_DIR: {"bind": "/logs"},
             os.path.abspath("roberta/checkpoint"): {"bind": "/app/models/roberta_checkpoint"}}
-
-
 
 def max_containers_reached(client, max_containers):
     try:
@@ -119,7 +109,6 @@ def max_containers_reached(client, max_containers):
         return True
 
 def load_video_pools(args):
-    # Load harmful and non-harmful videos from csv files
     try:
         TRAINING_BASE = args.training_videos
         harmful_pool = pd.read_csv(os.path.join(TRAINING_BASE, "harmful.csv"))
@@ -148,25 +137,21 @@ def get_training_videos(harmful_pool, harmless_pool, harmful_percentage):
     harmless_count = int(NUM_TRAINING_VIDEOS * ((100 - harmful_percentage) / 100))
 
     # Sample from pools
-    sampled_harmful = random.sample(harmful_pool["videoId"].tolist(), harmful_count)
-    sampled_harmless = random.sample(harmless_pool["videoId"].tolist(), harmless_count)
+    sampled_harmful = random.sample(harmful_pool["videoId"].tolist(), min(harmful_count, len(harmful_pool)))
+    sampled_harmless = random.sample(harmless_pool["videoId"].tolist(), min(harmless_count, len(harmless_pool)))
 
-    # print(f"Harmful videos selected: {sampled_harmful}")
-    # print(f"Non-harmful videos selected: {sampled_harmless}")
     # Combine and shuffle
     combined_videos = sampled_harmful + sampled_harmless
     random.shuffle(combined_videos)
-    training_videos = combined_videos
-
+    training_videos = combined_videos[:NUM_TRAINING_VIDEOS]  # Ensure exact length
+    print(f"Sampled training videos: {training_videos}")
     return training_videos
 
-
 def validate_model_path(model_path):
-    host_model_path = "roberta/checkpoint"  # Adjust to your host path
+    host_model_path = "roberta/checkpoint"
     if not os.path.exists(host_model_path):
         raise FileNotFoundError(f"Model directory {host_model_path} does not exist on host")
     print(f"Model directory {host_model_path} found on host")
-    
 
 def spawn_combined_containers(client, args):
     validate_model_path(args.model_path)
@@ -186,7 +171,7 @@ def spawn_combined_containers(client, args):
 
     for percentage in args.harmful_percentages:
         training = get_training_videos(harmful_pool, harmless_pool, percentage)
-        test_seed = training[-1]
+        test_seed = training[-1] if training else str(uuid4())
 
         for puppet_idx in range(args.puppets_per_group):
             for intervention_type in args.intervention_types:
@@ -209,12 +194,13 @@ def spawn_combined_containers(client, args):
                     "rounds": args.rounds,
                     "model_path": args.model_path,
                     "harm_threshold": 0.8,
+                    "focus": "homepage",
                     "training": training,
                     "trainingN": NUM_TRAINING_VIDEOS,
                     "testSeed": test_seed
                 }
 
-                print(f"Starting experiment {count + 1}/{total_experiments}: {puppet_id}")
+                print(f"Starting experiment {count + 1}/{total_experiments}: {puppet_id} with training: {training}")
                 if not args.simulate:
                     command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
                     container = client.containers.run(
