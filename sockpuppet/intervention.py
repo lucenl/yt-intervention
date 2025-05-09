@@ -20,9 +20,18 @@ from metadata_extractor import MetadataExtractor
 from roberta_classifier import RoBERTaClassifier
 import traceback
 
-def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initial_homepage=None, focus="both"):
+def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initial_homepage=None, focus="homepage"):
     """
-    Run intervention experiment
+    Run intervention experiment with the following steps per round:
+    1. Get initial recommendations from training end (first round) or based on focus (subsequent rounds).
+    2. Load metadata from the previous round (or round 0 for the first round).
+    3. Use the pre-sampled harmless reservoir from puppet state or args.
+    4. Classify recommendations.
+    5. Rerank using intervention strategy.
+    6. Select a video using selection strategy.
+    7. Watch the video.
+    8. Go to homepage or up-next based on focus, get new recommendations, and extract metadata.
+    Repeat for the specified number of rounds.
     
     Args:
         args: Arguments dictionary including model path, rounds, etc.
@@ -35,9 +44,9 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     Returns:
         Puppet object with experiment results
     """
-    # Setup logging
+    # Setup logging (using only puppetId)
     if logger is None:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, filename=f'/logs/{args["puppetId"]}.log', filemode='w')
         logger = logging.getLogger(__name__)
     
     logger.info(f"Entering run_intervention with args: {args}, puppet: {puppet}")
@@ -47,11 +56,18 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     output_dir = args.get("outputDir", "/output")
     model_path = args.get("model_path", "/app/models/roberta_checkpoint")
     intervention_type = args.get("intervention_type", "none")
-    selection_type = args.get("selection_type", "decay_weighted_random") 
+    selection_type = args.get("selection_type", "decay_weighted_random")
     num_rounds = int(args.get("rounds", 10))
     watch_duration = int(args.get("duration", 30))
     harm_threshold = float(args.get("harm_threshold", 0.8))
     training_videos = args.get("training", [])
+    
+    # Get harmless reservoir from puppet state if available, otherwise from args
+    harmless_reservoir_ids = []
+    if puppet and "args" in puppet and "harmless_reservoir" in puppet["args"]:
+        harmless_reservoir_ids = puppet["args"]["harmless_reservoir"]
+    else:
+        harmless_reservoir_ids = args.get("harmless_reservoir", [])
     
     # Setup directories
     experiment_dir = os.path.join(output_dir, puppet_id)
@@ -77,6 +93,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
             )
         except Exception as e:
             logger.error(f"Error initializing classifier: {e}")
+            raise
     
     # Initialize puppet if not provided
     if puppet is None:
@@ -93,78 +110,56 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
         }
     
     try:
-        # Initialize harmless reservoir with non-harmful training videos (Approach 2)
+        # Step 3: Use the pre-sampled harmless reservoir
         harmless_reservoir = []
-        if classifier and training_videos:
-            training_urls = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in training_videos]
-            training_ids = [vid.videoId for vid in training_urls]
-            training_csv = metadata_extractor.extract_metadata_batch(training_ids, filename="metadata_training.csv")
-            training_df = classifier.classify_from_csv(training_csv)
-            training_scores = classifier.classify_video_list(training_urls, training_df)
-            for video, score in zip(training_urls, training_scores):
-                if score <= harm_threshold and video.videoId not in [v.videoId for v in harmless_reservoir]:
-                    harmless_reservoir.append(video)
-            logger.info(f"Initialized harmless reservoir with {len(harmless_reservoir)} non-harmful training videos")
+        if harmless_reservoir_ids:
+            harmless_reservoir = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in harmless_reservoir_ids]
+            logger.info(f"Using pre-sampled harmless reservoir with {len(harmless_reservoir)} videos")
         else:
-            if not training_videos:
-                logger.warning("No training videos provided. Harmless reservoir will start empty and grow dynamically.")
-            if not classifier:
-                logger.warning("No classifier available. Cannot initialize harmless reservoir with training videos.")
+            logger.warning("No pre-sampled harmless reservoir provided. Reservoir will be empty.")
         
-        logger.info(f"Puppet before first add_action: {puppet}")
         # Add start action
         add_action(puppet, "intervention_start")
         
-        # Convert initial recommendations to Video objects if provided
-        current_recommendations = None
-        if focus in ["homepage", "both"] and initial_homepage:
-            current_recommendations = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_homepage]
+        # Step 1: Set initial recommendations based on focus
+        initial_recommendations = None
+        if focus == "homepage" and initial_homepage:
+            initial_recommendations = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_homepage]
             add_action(puppet, "using_initial_homepage_recommendations", initial_homepage)
-        elif focus in ["up-next", "both"] and initial_upnext:
-            current_recommendations = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_upnext]
+        elif focus == "up-next" and initial_upnext:
+            initial_recommendations = [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_upnext]
             add_action(puppet, "using_initial_upnext_recommendations", initial_upnext)
+        elif focus == "both" and initial_homepage and initial_upnext:
+            initial_recommendations = ([Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_homepage] +
+                                     [Video(None, f"https://youtube.com/watch?v={vid}") for vid in initial_upnext])
+            add_action(puppet, "using_initial_both_recommendations", initial_homepage + initial_upnext)
         else:
             logger.warning(f"No valid initial recommendations for focus: {focus}")
             return puppet
         
         # Run intervention rounds
+        recommendations = initial_recommendations
         for round_num in range(1, num_rounds + 1):
             logger.info(f"Starting round {round_num}")
             
-            # Get recommendations based on focus
-            if round_num == 1 and current_recommendations:
-                recommendations = current_recommendations
-                logger.info(f"Using initial recommendations: {len(recommendations)} videos")
-            else:
-                try:
-                    if focus == "homepage":
-                        recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-                        logger.info(f"Got {len(recommendations)} homepage recommendations")
-                        add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in recommendations])
-                    elif focus == "up-next":
-                        recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
-                        logger.info(f"Got {len(recommendations)} up-next recommendations")
-                        add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in recommendations])
-                    else:  # focus == "both"
-                        recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=4)
-                        logger.info(f"Got {len(recommendations)} homepage recommendations")
-                        add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in recommendations])
-                except Exception as e:
-                    logger.error(f"Failed to get recommendations for round {round_num}: {str(e)}")
-                    puppet["harmful_exposure"].append({
-                        "round": round_num,
-                        "harmful_percentage": 0.0,
-                        "error": str(e)
-                    })
-                    continue
+            # Step 2: Load metadata from the previous round (or round 0 for round 1)
+            prev_round = 0 if round_num == 1 else round_num - 1
+            if focus == "homepage":
+                metadata_csv = os.path.join(metadata_dir, f"metadata_homepage_round_{prev_round}.csv")
+            elif focus == "up-next":
+                metadata_csv = os.path.join(metadata_dir, f"metadata_upnext_round_{prev_round}.csv")
+            elif focus == "both":
+                # For "both", use homepage metadata as primary (can adjust if needed)
+                metadata_csv = os.path.join(metadata_dir, f"metadata_homepage_round_{prev_round}.csv")
             
-            # Extract video IDs
+            if not os.path.exists(metadata_csv):
+                logger.error(f"Metadata file {metadata_csv} not found for round {round_num}")
+                raise FileNotFoundError(f"Metadata file {metadata_csv} not found")
+            logger.info(f"Loaded metadata from: {metadata_csv}")
+            
+            # Step 4: Classify recommendations
             video_ids = [video.videoId for video in recommendations]
-            logger.info(f"Original recommendations (before reranking): {video_ids}")
-            
-            # Get metadata and classify all recommendations
-            metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_round_{round_num}.csv")
-            logger.info(f"Metadata saved to: {metadata_csv}")
+            logger.info(f"Recommendations for round {round_num}: {video_ids}")
             harmful_pct = 0
             harm_scores = [0.0] * len(recommendations)
             if classifier:
@@ -177,16 +172,10 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                 logger.info(f"Harm scores: {dict(zip(video_ids, harm_scores))}")
                 harmful_count = sum(1 for score in harm_scores if score > harm_threshold)
                 harmful_pct = (harmful_count / len(recommendations)) * 100 if recommendations else 0
-                source = "Homepage" if focus == "homepage" else "Up-Next" if focus == "up-next" else "Homepage"
+                source = "Homepage" if focus in ["homepage", "both"] else "Up-Next" if focus == "up-next" else "Both"
                 logger.info(f"{source} harmful content: {harmful_pct:.2f}%")
-                
-                # Update harmless reservoir with non-harmful videos from this round (Approach 3)
-                for video, score in zip(recommendations, harm_scores):
-                    if score <= harm_threshold and video.videoId not in [v.videoId for v in harmless_reservoir]:
-                        harmless_reservoir.append(video)
-                logger.info(f"Harmless reservoir size after update: {len(harmless_reservoir)}")
             
-            # Apply intervention
+            # Step 5: Rerank using intervention strategy
             modified_recommendations = recommendations.copy()
             if intervention_type == 'downrank':
                 video_scores = list(zip(recommendations, harm_scores))
@@ -195,32 +184,30 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                 logger.info(f"Reranked recommendations: {[vid.videoId for vid in modified_recommendations]}")
             
             elif intervention_type == 'replace' and harmless_reservoir:
-                # Replace harmful videos in the top 25
-                top_25 = modified_recommendations[:25]  # Limit to top 25 for replacement
-                current_video_ids = set(video.videoId for video in modified_recommendations)  # IDs in current homepage
+                # Replace harmful videos in the recommendations (already trimmed to 25 or 12 in sockpuppet.py)
+                current_video_ids = set(video.videoId for video in modified_recommendations)
                 used_replacements = set()
-                for i, (video, score) in enumerate(zip(top_25, harm_scores[:25])):
+                for i, (video, score) in enumerate(zip(modified_recommendations, harm_scores)):
                     if score > harm_threshold:  # Harmful video
-                        # Filter harmless_reservoir to exclude videos already in the current recommendations
                         available_replacements = [v for v in harmless_reservoir if v.videoId not in current_video_ids and v.videoId not in used_replacements]
                         if available_replacements:
                             replacement = random.choice(available_replacements)
                             modified_recommendations[i] = replacement
                             used_replacements.add(replacement.videoId)
-                            harmless_reservoir.remove(replacement)  # Remove used video
+                            harmless_reservoir.remove(replacement)
                             logger.info(f"Replaced harmful video {video.videoId} (score: {score}) with {replacement.videoId}")
                         else:
                             logger.warning(f"No suitable replacement found for harmful video {video.videoId} (score: {score})")
                 logger.info(f"Modified recommendations: {[vid.videoId for vid in modified_recommendations]}")
-            
-            # Select video to watch
+    
+            # Step 6: Select video to watch
             if not modified_recommendations:
-                logger.warning("No videos available to select. Skipping round.")
+                logger.warning("No videos available to select. Terminating intervention.")
                 puppet["harmful_exposure"].append({
                     "round": round_num,
                     "harmful_percentage": 0.0
                 })
-                continue
+                raise ValueError("No videos available to select")
                 
             if selection_type == 'decay_weighted_random':
                 decay_factor = 0.9
@@ -246,43 +233,48 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
             
             add_action(puppet, "select_video", selected_video.videoId)
             
+            # Step 7: Watch the video
             try:
                 logger.info(f"Watching video: {selected_video.videoId}")
                 puppet["driver"].play(selected_video, duration=watch_duration)
                 logger.info(f"Finished watching video: {selected_video.videoId}")
                 add_action(puppet, "watch", selected_video.videoId)
                 
-                sidebar_harmful_pct = 0
-                if focus in ["up-next", "both"]:
-                    sidebar = puppet["driver"].get_upnext_recommendations(topn=12)
-                    logger.info(f"Got {len(sidebar)} sidebar recommendations")
-                    add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in sidebar])
-                    
-                    if classifier:
-                        sidebar_ids = [video.videoId for video in sidebar]
-                        sidebar_csv = metadata_extractor.extract_metadata_batch(sidebar_ids, filename=f"metadata_sidebar_round_{round_num}.csv")
-                        logger.info(f"Sidebar metadata saved to: {sidebar_csv}")
-                        sidebar_df = classifier.classify_from_csv(sidebar_csv)
-                        sidebar_scores = classifier.classify_video_list(sidebar, sidebar_df)
-                        sidebar_harmful_count = sum(1 for score in sidebar_scores if score > harm_threshold)
-                        sidebar_harmful_pct = (sidebar_harmful_count / len(sidebar)) * 100 if sidebar else 0
-                        logger.info(f"Sidebar harmful content: {sidebar_harmful_pct:.2f}%")
-                        
-                        for video, score in zip(sidebar, sidebar_scores):
-                            if score <= harm_threshold and video.videoId not in [v.videoId for v in harmless_reservoir]:
-                                harmless_reservoir.append(video)
-                        logger.info(f"Harmless reservoir size after sidebar update: {len(harmless_reservoir)}")
-                    
-                    if focus == "up-next":
-                        current_recommendations = sidebar
-                
                 round_result = {
                     "round": round_num,
                     "timestamp": datetime.now().isoformat(),
                     "harmful_percentage": harmful_pct,
-                    "sidebar_harmful_percentage": sidebar_harmful_pct if focus in ["up-next", "both"] else None,
                     "selected_video": selected_video.videoId
                 }
+                
+                # Step 8: Go to homepage or up-next based on focus, get new recommendations, and extract metadata
+                if round_num < num_rounds:  # Fetch new recommendations for subsequent rounds
+                    if focus == "homepage":
+                        recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+                        logger.info(f"Got {len(recommendations)} homepage recommendations")
+                        add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in recommendations])
+                        # Extract metadata immediately
+                        video_ids = [video.videoId for video in recommendations]
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}.csv")
+                        logger.info(f"Metadata saved to: {metadata_csv}")
+                    elif focus == "up-next":
+                        recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
+                        logger.info(f"Got {len(recommendations)} up-next recommendations")
+                        add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in recommendations])
+                        # Extract metadata immediately
+                        video_ids = [video.videoId for video in recommendations]
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_upnext_round_{round_num}.csv")
+                        logger.info(f"Metadata saved to: {metadata_csv}")
+                    elif focus == "both":
+                        homepage_recs = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+                        upnext_recs = puppet["driver"].get_upnext_recommendations(topn=12)
+                        recommendations = homepage_recs + upnext_recs
+                        logger.info(f"Got {len(homepage_recs)} homepage and {len(upnext_recs)} up-next recommendations")
+                        add_action(puppet, "get_both_recommendations", [vid.videoId for vid in homepage_recs + upnext_recs])
+                        # Extract metadata immediately (for homepage as primary, can adjust if needed)
+                        video_ids = [video.videoId for video in recommendations]
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}.csv")
+                        logger.info(f"Metadata saved to: {metadata_csv}")
                 
             except Exception as e:
                 logger.error(f"Error watching video: {str(e)}\n{traceback.format_exc()}")
@@ -292,19 +284,23 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                     "harmful_percentage": harmful_pct,
                     "error": str(e)
                 }
+                puppet["rounds"].append(round_result)
+                puppet["harmful_exposure"].append({
+                    "round": round_num,
+                    "harmful_percentage": harmful_pct
+                })
+                raise  # Stop intervention on error
             
             puppet["rounds"].append(round_result)
             puppet["harmful_exposure"].append({
                 "round": round_num,
-                "harmful_percentage": harmful_pct,
-                "sidebar_harmful_percentage": sidebar_harmful_pct if focus in ["up-next", "both"] else None
+                "harmful_percentage": harmful_pct
             })
             
             time.sleep(2)
         
         add_action(puppet, "intervention_end")
         generate_visualization(puppet, os.path.join(experiment_dir, "visualizations"))
-        save_results(puppet, os.path.join(output_dir, "results"))
         
         logger.info(f"Exiting run_intervention with puppet: {puppet}")
         return puppet
@@ -314,9 +310,8 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
         if puppet.get("standalone", False) and "driver" in puppet:
             puppet["driver"].close()
         puppet["error"] = str(e)
-        save_results(puppet, os.path.join(output_dir, "results"))
         logger.info(f"Exiting run_intervention with puppet after error: {puppet}")
-        return puppet
+        raise
 
 def add_action(puppet, action, params=None):
     puppet["actions"].append({
@@ -325,28 +320,6 @@ def add_action(puppet, action, params=None):
         "timestamp": datetime.now().isoformat()
     })
 
-def save_recommendations_to_csv(puppet_id, round_num, source, recommendations, output_dir):
-    csv_path = os.path.join(output_dir, f"{puppet_id}_round{round_num}_{source}.csv")
-    data = []
-    for video in recommendations:
-        item = {'video_id': video.videoId, 'round': round_num, 'source': source}
-        if hasattr(video, 'title'):
-            item['title'] = video.title
-        if hasattr(video, 'channel'):
-            item['channel'] = video.channel
-        if hasattr(video, 'description'):
-            item['description'] = video.description
-        data.append(item)
-    df = pd.DataFrame(data)
-    df.to_csv(csv_path, index=False)
-
-def save_results(puppet, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    results = {k: v for k, v in puppet.items() if k != 'driver'}
-    results_path = os.path.join(output_dir, f"{puppet['puppetId']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
-
 def generate_visualization(puppet, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     exposure_data = puppet.get('harmful_exposure', [])
@@ -354,18 +327,14 @@ def generate_visualization(puppet, output_dir):
         return
     rounds = [d.get('round', i+1) for i, d in enumerate(exposure_data)]
     harmful_percentages = [d.get('harmful_percentage', 0) for d in exposure_data]
-    sidebar_harmful = [d.get('sidebar_harmful_percentage', 0) for d in exposure_data if d.get('sidebar_harmful_percentage') is not None]
     plt.figure(figsize=(10, 6))
-    plt.plot(rounds, harmful_percentages, 'b-o', linewidth=2, label='Main Recommendations')
-    if sidebar_harmful:
-        sidebar_rounds = rounds[:len(sidebar_harmful)]
-        plt.plot(sidebar_rounds, sidebar_harmful, 'r-o', linewidth=2, label='Sidebar')
+    plt.plot(rounds, harmful_percentages, 'b-o', linewidth=2, label='Recommendations')
     plt.title(f"Harmful Content Exposure - {puppet['puppetId']}", fontsize=14)
     plt.xlabel('Round', fontsize=12)
     plt.ylabel('Harmful Content (%)', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
-    plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_exposure_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_exposure.png"), dpi=300, bbox_inches='tight')
 
 if __name__ == "__main__":
     import argparse
@@ -382,9 +351,10 @@ if __name__ == "__main__":
     parser.add_argument("--rounds", type=int, default=10, help="Number of rounds")
     parser.add_argument("--duration", type=int, default=30, help="Video watch duration (seconds)")
     parser.add_argument("--harm-threshold", type=float, default=0.5, help="Harm classification threshold")
-    parser.add_argument("--focus", default="both", choices=["homepage", "up-next", "both"],
+    parser.add_argument("--focus", default="homepage", choices=["homepage", "up-next", "both"],
                         help="Focus on homepage or up-next recommendations")
     parser.add_argument("--training", nargs="+", help="List of training video IDs")
+    parser.add_argument("--harmless-reservoir", nargs="+", help="List of pre-sampled harmless video IDs")
     args = parser.parse_args()
     args_dict = {
         "puppetId": args.puppet_id,
@@ -398,6 +368,7 @@ if __name__ == "__main__":
         "harm_threshold": args.harm_threshold,
         "focus": args.focus,
         "training": args.training,
+        "harmless_reservoir": args.harmless_reservoir,
         "standalone": True
     }
     run_intervention(args_dict)

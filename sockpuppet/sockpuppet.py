@@ -109,6 +109,24 @@ def save_puppet(puppet, args):
     with open(os.path.join(makedir(args["outputDir"], "puppets"), puppet["puppetId"]), "w") as f:
         json.dump(js, f, default=str, indent=4)
 
+def extract_recommendations(puppet):
+    logger.info(f"Puppet state in extract_recommendations: {puppet}")
+    upnext_recommendations = []
+    homepage_recommendations = []
+    
+    for action in reversed(puppet["actions"]):
+        if action["action"] == "get_upnext_recommendations" and not upnext_recommendations:
+            upnext_recommendations = action["params"] or []
+        elif action["action"] == "get_homepage_recommendations" and not homepage_recommendations:
+            homepage_recommendations = action["params"] or []
+        if upnext_recommendations and homepage_recommendations:
+            break
+    
+    upnext_recommendations = upnext_recommendations[:12]
+    homepage_recommendations = homepage_recommendations[:25]
+    
+    return upnext_recommendations, homepage_recommendations
+
 def train(puppet, args):
     logger.info(f"Puppet state at start of train: {puppet}")
     get_homepage(puppet)
@@ -145,12 +163,30 @@ def train(puppet, args):
 
     add_action(puppet, "training_end")
 
+    # Collect recommendations and metadata after training
+    experiment_dir = os.path.join(args['outputDir'], args['puppetId'])
+    metadata_dir = os.path.join(experiment_dir, "metadata")
+    if not os.path.exists(metadata_dir):
+        os.makedirs(metadata_dir)
+
+    # Initialize metadata extractor
+    from metadata_extractor import MetadataExtractor
+    metadata_extractor = MetadataExtractor(
+        output_dir=metadata_dir,
+        timeout=60,
+        max_workers=10
+    )
+
     if last_video is not None:
         retry_upnext = 0
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"last_video_before_recs_{timestamp}.png"))
         up_next = puppet["driver"].get_upnext_recommendations(topn=12)
         add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in up_next])
+        
+        # Extract metadata for up_next recommendations
+        up_next_ids = [vid.videoId for vid in up_next]
+        metadata_extractor.extract_metadata_batch(up_next_ids, filename="metadata_upnext_round_0.csv")
     else:
         raise Exception("No video to get recommendations from.")
 
@@ -158,6 +194,11 @@ def train(puppet, args):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"homepage_first_attempt_{timestamp}.png"))
     add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
+    
+    # Extract metadata for homepage recommendations
+    homepage_ids = [vid.videoId for vid in homepage]
+    metadata_extractor.extract_metadata_batch(homepage_ids, filename="metadata_homepage_round_0.csv")
+    
     logger.info(f"Puppet state at end of train: {puppet}")
 
 def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
@@ -175,30 +216,11 @@ def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
         logger.exception(f"Error in intervention step: {e}")
         raise
 
-def extract_recommendations(puppet):
-    logger.info(f"Puppet state in extract_recommendations: {puppet}")
-    upnext_recommendations = []
-    homepage_recommendations = []
-    
-    for action in reversed(puppet["actions"]):
-        if action["action"] == "get_upnext_recommendations" and not upnext_recommendations:
-            upnext_recommendations = action["params"] or []
-        elif action["action"] == "get_homepage_recommendations" and not homepage_recommendations:
-            homepage_recommendations = action["params"] or []
-        if upnext_recommendations and homepage_recommendations:
-            break
-    
-    upnext_recommendations = upnext_recommendations[:12]
-    homepage_recommendations = homepage_recommendations[:25]
-    
-    return upnext_recommendations, homepage_recommendations
-
 if __name__ == "__main__":
     args = json.loads(sys.argv[1])
     if "outputDir" not in args:
         args["outputDir"] = "/output"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}_{timestamp}.log', level=logging.INFO, filemode='w')
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', filename=f'/logs/{args["puppetId"]}', level=logging.INFO, filemode='w')
     logger = logging.getLogger(__name__)
 
     try:

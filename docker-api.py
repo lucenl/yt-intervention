@@ -20,11 +20,19 @@ USERNAME = os.getuid()
 
 PERCENTAGE_GROUPS = [50]
 PUPPETS_PER_GROUP = 1
+HARMLESS_RESERVOIR_SIZE = 10  # Fixed size for sampled harmless reservoir
 
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--build", action="store_true", help="Build docker image")
-    parser.add_argument("--run", action="store_true", help="Run all docker containers")
+    parser.add_argument("--train-only", action="store_true", help="Run only the training phase")
+    parser.add_argument("--intervention-only", action="store_true", help="Run only the intervention phase")
+    parser.add_argument("--combined", action="store_true", help="Run both training and intervention phases")
+    parser.add_argument(
+        "--puppet-folder",
+        default='output/puppets/',
+        help="Path to folder containing puppet state files for intervention (optional)"
+    )
     parser.add_argument(
         "--simulate",
         action="store_true",
@@ -47,29 +55,23 @@ def parse_args():
         default="data/training/",
         help="Path to the training videos folder",
     )
-    # New arguments for intervention mode
-    parser.add_argument(
-        "--intervention",
-        action="store_true",
-        help="Run intervention experiments instead of training",
-    )  
     parser.add_argument(
         "--model-path",
         default="/app/models/roberta_checkpoint",
         help="Path to the RoBERTa model checkpoint inside container",
     )
     parser.add_argument(
-            "--intervention-types",
-            nargs="+",
-            default=["none", "downrank", "replace"],
-            choices=["none", "downrank", "replace"],
-            help="Intervention types to run",
-        )
+        "--intervention-types",
+        nargs="+",
+        default="downrank",
+        choices=["none", "downrank", "replace"],
+        help="Intervention types to run",
+    )
     parser.add_argument(
-    "--selection-type",
-    default="decay_weighted_random",
-    choices=["top", "random", "decay_weighted_random"],
-    help="Video selection strategy for intervention"
+        "--selection-type",
+        default="decay_weighted_random",
+        choices=["top", "random", "decay_weighted_random"],
+        help="Video selection strategy for intervention"
     )
     parser.add_argument(
         "--rounds",
@@ -95,12 +97,18 @@ def parse_args():
     return args, parser
 
 def build_image():
+    # get docker client and build image
     client = docker.from_env()
+
+    # build the image from the Dockerfile
     client.images.build(path="./sockpuppet", tag=IMAGE_NAME, rm=True)
 
 def get_mount_volumes():
-    return {OUTPUT_DIR: {"bind": "/output"}, LOGS_DIR: {"bind": "/logs"},
-            os.path.abspath("roberta/checkpoint"): {"bind": "/app/models/roberta_checkpoint"}}
+    return {
+        OUTPUT_DIR: {"bind": "/output"},
+        LOGS_DIR: {"bind": "/logs"},
+        os.path.abspath("roberta/checkpoint"): {"bind": "/app/models/roberta_checkpoint"}
+    }
 
 def max_containers_reached(client, max_containers):
     try:
@@ -147,11 +155,216 @@ def get_training_videos(harmful_pool, harmless_pool, harmful_percentage):
     print(f"Sampled training videos: {training_videos}")
     return training_videos
 
+def sample_harmless_reservoir(harmless_pool, training_videos, size=HARMLESS_RESERVOIR_SIZE):
+    """
+    Sample a fixed number of harmless videos, excluding those used in training.
+    
+    Args:
+        harmless_pool: List of all harmless video IDs
+        training_videos: List of video IDs used for training
+        size: Maximum number of videos to sample
+    
+    Returns:
+        List of sampled harmless video IDs
+    """
+    available_harmless = [vid for vid in harmless_pool["videoId"].tolist() if vid not in training_videos]
+    num_samples = min(size, len(available_harmless))
+    if num_samples > 0:
+        return random.sample(available_harmless, num_samples)
+    return []
+
 def validate_model_path(model_path):
     host_model_path = "roberta/checkpoint"
     if not os.path.exists(host_model_path):
         raise FileNotFoundError(f"Model directory {host_model_path} does not exist on host")
     print(f"Model directory {host_model_path} found on host")
+
+def spawn_training_containers(client, args):
+    harmful_pool, harmless_pool = load_video_pools(args)
+    if harmful_pool is None or harmless_pool is None:
+        raise FileNotFoundError("Failed to load video pools. Check the training-videos path and CSV files.")
+
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    if not os.path.exists(LOGS_DIR):
+        os.makedirs(LOGS_DIR)
+
+    count = 0
+    total_experiments = args.puppets_per_group * len(args.harmful_percentages)
+
+    print(f"Preparing to run {total_experiments} training experiments")
+
+    for percentage in args.harmful_percentages:
+        training = get_training_videos(harmful_pool, harmless_pool, percentage)
+        harmless_reservoir = sample_harmless_reservoir(harmless_pool, training)
+        test_seed = training[-1] if training else str(uuid4())
+
+        for puppet_idx in range(args.puppets_per_group):
+            while max_containers_reached(client, args.max_containers):
+                print("Max containers reached. Sleeping...")
+                sleep(args.sleep_duration)
+
+            puppet_id = f"harmful_{percentage},{str(uuid4())[:8]}_train"
+            profile_path = f"/output/profiles/{puppet_id}"
+
+            experiment_args = {
+                "puppetId": puppet_id,
+                "profile_dir": profile_path,
+                "outputDir": "/output",
+                "duration": WATCH_DURATION,
+                "description": f"Training experiment: {percentage}% harmful",
+                "steps": "train",
+                "training": training,
+                "trainingN": NUM_TRAINING_VIDEOS,
+                "testSeed": test_seed,
+                "harmless_reservoir": harmless_reservoir  # Pass sampled harmless reservoir
+            }
+
+            print(f"Starting training experiment {count + 1}/{total_experiments}: {puppet_id} with training: {training}")
+            if not args.simulate:
+                command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
+                container = client.containers.run(
+                    IMAGE_NAME,
+                    command,
+                    volumes=get_mount_volumes(),
+                    shm_size="1G",
+                    remove=True,
+                    detach=True
+                )
+            count += 1
+            sleep(3)
+
+    print(f"Launched {count} training experiments")
+
+def spawn_intervention_containers(client, args):
+    validate_model_path(args.model_path)
+    harmful_pool, harmless_pool = load_video_pools(args)
+    if harmful_pool is None or harmless_pool is None:
+        raise FileNotFoundError("Failed to load video pools. Check the training-videos path and CSV files.")
+
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    if not os.path.exists(LOGS_DIR):
+        os.makedirs(LOGS_DIR)
+
+    count = 0
+    puppet_ids = []
+
+    # If puppet_folder is provided, load all puppet files from the folder
+    if args.puppet_folder:
+        puppet_folder = args.puppet_folder
+        if not os.path.exists(puppet_folder):
+            raise FileNotFoundError(f"Puppet folder {puppet_folder} does not exist")
+        puppet_files = [f for f in os.listdir(puppet_folder) if os.path.isfile(os.path.join(puppet_folder, f))]
+        puppet_ids = [os.path.splitext(f)[0] for f in puppet_files]
+        total_experiments = len(puppet_ids) * len(args.intervention_types)
+        print(f"Found {len(puppet_ids)} puppets in folder {puppet_folder}")
+    else:
+        # Fallback to generating new puppets
+        total_experiments = args.puppets_per_group * len(args.harmful_percentages) * len(args.intervention_types)
+        print(f"Generating new puppets for intervention")
+
+    print(f"Preparing to run {total_experiments} intervention experiments")
+
+    for idx, intervention_type in enumerate(args.intervention_types):
+        if args.puppet_folder:
+            # Process each puppet in the folder
+            for puppet_idx, puppet_id in enumerate(puppet_ids):
+                while max_containers_reached(client, args.max_containers):
+                    print("Max containers reached. Sleeping...")
+                    sleep(args.sleep_duration)
+
+                # Load the puppet state to get the training videos and harmless reservoir
+                puppet_file = os.path.join(args.puppet_folder, puppet_id)
+                with open(puppet_file, "r") as f:
+                    puppet_data = json.load(f)
+                training_videos = puppet_data.get("args", {}).get("training", [])
+                harmless_reservoir = puppet_data.get("args", {}).get("harmless_reservoir", [])
+
+                profile_path = f"/output/profiles/{puppet_id}"
+
+                # Preserve parameters from training phase, only update what's necessary
+                experiment_args = {
+                    "puppetId": puppet_id,
+                    "profile_dir": profile_path,
+                    "outputDir": "/output",
+                    "duration": puppet_data.get("args", {}).get("duration", WATCH_DURATION),
+                    "description": f"Intervention experiment: {puppet_id}, {intervention_type}",
+                    "steps": "intervention",
+                    "intervention_type": intervention_type,
+                    "selection_type": args.selection_type,
+                    "rounds": args.rounds,
+                    "model_path": args.model_path,
+                    "harm_threshold": 0.8,
+                    "focus": "homepage",  # Can be overridden by command-line args if needed
+                    "training": training_videos,
+                    "trainingN": puppet_data.get("args", {}).get("trainingN", NUM_TRAINING_VIDEOS),
+                    "testSeed": puppet_data.get("args", {}).get("testSeed", str(uuid4())),
+                    "harmless_reservoir": harmless_reservoir  # Reuse the reservoir from training
+                }
+
+                print(f"Starting intervention experiment {count + 1}/{total_experiments}: {puppet_id} with intervention type: {intervention_type}")
+                if not args.simulate:
+                    command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
+                    container = client.containers.run(
+                        IMAGE_NAME,
+                        command,
+                        volumes=get_mount_volumes(),
+                        shm_size="1G",
+                        remove=True,
+                        detach=True
+                    )
+                count += 1
+                sleep(3)
+        else:
+            # Fallback to generating new puppets (shouldn't happen in intervention-only mode)
+            for percentage in args.harmful_percentages:
+                training = get_training_videos(harmful_pool, harmless_pool, percentage)
+                harmless_reservoir = sample_harmless_reservoir(harmless_pool, training)
+                test_seed = training[-1] if training else str(uuid4())
+
+                for puppet_idx in range(args.puppets_per_group):
+                    while max_containers_reached(client, args.max_containers):
+                        print("Max containers reached. Sleeping...")
+                        sleep(args.sleep_duration)
+
+                    puppet_id = f"harmful_{percentage},{str(uuid4())[:8]}_{intervention_type}"
+                    profile_path = f"/output/profiles/{puppet_id}"
+
+                    experiment_args = {
+                        "puppetId": puppet_id,
+                        "profile_dir": profile_path,
+                        "outputDir": "/output",
+                        "duration": WATCH_DURATION,
+                        "description": f"Intervention experiment: {percentage}% harmful, {intervention_type}",
+                        "steps": "intervention",
+                        "intervention_type": intervention_type,
+                        "selection_type": args.selection_type,
+                        "rounds": args.rounds,
+                        "model_path": args.model_path,
+                        "harm_threshold": 0.8,
+                        "focus": "homepage",
+                        "training": training,
+                        "trainingN": NUM_TRAINING_VIDEOS,
+                        "testSeed": test_seed,
+                        "harmless_reservoir": harmless_reservoir
+                    }
+
+                    print(f"Starting intervention experiment {count + 1}/{total_experiments}: {puppet_id} with training: {training}")
+                    if not args.simulate:
+                        command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
+                        container = client.containers.run(
+                            IMAGE_NAME,
+                            command,
+                            volumes=get_mount_volumes(),
+                            shm_size="1G",
+                            remove=True,
+                            detach=True
+                        )
+                    count += 1
+                    sleep(3)
+
+    print(f"Launched {count} intervention experiments")
 
 def spawn_combined_containers(client, args):
     validate_model_path(args.model_path)
@@ -171,6 +384,7 @@ def spawn_combined_containers(client, args):
 
     for percentage in args.harmful_percentages:
         training = get_training_videos(harmful_pool, harmless_pool, percentage)
+        harmless_reservoir = sample_harmless_reservoir(harmless_pool, training)
         test_seed = training[-1] if training else str(uuid4())
 
         for puppet_idx in range(args.puppets_per_group):
@@ -197,10 +411,11 @@ def spawn_combined_containers(client, args):
                     "focus": "homepage",
                     "training": training,
                     "trainingN": NUM_TRAINING_VIDEOS,
-                    "testSeed": test_seed
+                    "testSeed": test_seed,
+                    "harmless_reservoir": harmless_reservoir
                 }
 
-                print(f"Starting experiment {count + 1}/{total_experiments}: {puppet_id} with training: {training}")
+                print(f"Starting combined experiment {count + 1}/{total_experiments}: {puppet_id} with training: {training}")
                 if not args.simulate:
                     command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
                     container = client.containers.run(
@@ -224,12 +439,18 @@ def main():
         build_image()
         print("Build complete!")
 
-    if args.run:
-        print("Starting docker containers...")
-        client = docker.from_env()
+    client = docker.from_env()
+    if args.train_only:
+        print("Starting training containers...")
+        spawn_training_containers(client, args)
+    elif args.intervention_only:
+        print("Starting intervention containers...")
+        spawn_intervention_containers(client, args)
+    elif args.combined:
+        print("Starting combined containers...")
         spawn_combined_containers(client, args)
 
-    if not args.build and not args.run:
+    if not any([args.build, args.train_only, args.intervention_only, args.combined]):
         parser.print_help()
 
 if __name__ == "__main__":
