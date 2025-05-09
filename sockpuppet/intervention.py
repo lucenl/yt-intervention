@@ -44,9 +44,16 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     Returns:
         Puppet object with experiment results
     """
-    # Setup logging (using only puppetId)
+    # Setup logging (using puppetId, step, intervention type, and timestamp)
     if logger is None:
-        logging.basicConfig(level=logging.INFO, filename=f'/logs/{args["puppetId"]}.log', filemode='w')
+        intervention_type = args.get("intervention_type", "unknown")
+        log_filename = f"{args['puppetId']}_intervention_{intervention_type}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            filename=os.path.join('/logs', log_filename),
+            filemode='a'
+        )
         logger = logging.getLogger(__name__)
     
     logger.info(f"Entering run_intervention with args: {args}, puppet: {puppet}")
@@ -60,7 +67,6 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     num_rounds = int(args.get("rounds", 10))
     watch_duration = int(args.get("duration", 30))
     harm_threshold = float(args.get("harm_threshold", 0.8))
-    training_videos = args.get("training", [])
     
     # Get harmless reservoir from puppet state if available, otherwise from args
     harmless_reservoir_ids = []
@@ -144,13 +150,14 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
             
             # Step 2: Load metadata from the previous round (or round 0 for round 1)
             prev_round = 0 if round_num == 1 else round_num - 1
+            prev_filename = "metadata_homepage_round_0.csv" if round_num == 1 else f"metadata_homepage_round_{prev_round}_{intervention_type}.csv"
             if focus == "homepage":
-                metadata_csv = os.path.join(metadata_dir, f"metadata_homepage_round_{prev_round}.csv")
+                metadata_csv = os.path.join(metadata_dir, prev_filename)
             elif focus == "up-next":
-                metadata_csv = os.path.join(metadata_dir, f"metadata_upnext_round_{prev_round}.csv")
+                metadata_csv = os.path.join(metadata_dir, prev_filename)
             elif focus == "both":
                 # For "both", use homepage metadata as primary (can adjust if needed)
-                metadata_csv = os.path.join(metadata_dir, f"metadata_homepage_round_{prev_round}.csv")
+                metadata_csv = os.path.join(metadata_dir, prev_filename)
             
             if not os.path.exists(metadata_csv):
                 logger.error(f"Metadata file {metadata_csv} not found for round {round_num}")
@@ -255,7 +262,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in recommendations])
                         # Extract metadata immediately
                         video_ids = [video.videoId for video in recommendations]
-                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}.csv")
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}_{intervention_type}.csv")
                         logger.info(f"Metadata saved to: {metadata_csv}")
                     elif focus == "up-next":
                         recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
@@ -263,7 +270,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in recommendations])
                         # Extract metadata immediately
                         video_ids = [video.videoId for video in recommendations]
-                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_upnext_round_{round_num}.csv")
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_upnext_round_{round_num}_{intervention_type}.csv")
                         logger.info(f"Metadata saved to: {metadata_csv}")
                     elif focus == "both":
                         homepage_recs = puppet["driver"].get_homepage_recommendations(scroll_times=4)
@@ -273,7 +280,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         add_action(puppet, "get_both_recommendations", [vid.videoId for vid in homepage_recs + upnext_recs])
                         # Extract metadata immediately (for homepage as primary, can adjust if needed)
                         video_ids = [video.videoId for video in recommendations]
-                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}.csv")
+                        metadata_csv = metadata_extractor.extract_metadata_batch(video_ids, filename=f"metadata_homepage_round_{round_num}_{intervention_type}.csv")
                         logger.info(f"Metadata saved to: {metadata_csv}")
                 
             except Exception as e:
