@@ -6,17 +6,10 @@ import time
 from datetime import datetime
 import os
 from metadata_extractor import MetadataExtractor
+from selenium.common.exceptions import TimeoutException, WebDriverException
+import tempfile
 
 def init_puppet(puppetId, profile_dir):
-    """
-    Creates a new puppet object with:
-    1. A YouTube driver (browser automation)
-    2. A unique ID
-    3. Empty actions list to track what happens
-    4. Start time to track duration
-    5. Empty rounds list to track intervention rounds
-    6. Empty harmful_exposure list to track harmful content exposure
-    """
     puppet = dict(
         driver=YTDriver(profile_dir=profile_dir, use_virtual_display=True),
         puppetId=puppetId,
@@ -53,7 +46,7 @@ def make_url(videoId):
     return "https://youtube.com/watch?v=" + str(videoId)
 
 def add_action(puppet, action, params=None):
-    logger.info(f"Action: {action}, Params: {params}")
+    logging.info(f"Action: {action}, Params: {params}")
     puppet["actions"].append({
         "action": action,
         "params": params,
@@ -61,7 +54,7 @@ def add_action(puppet, action, params=None):
     })
 
 def get_homepage(puppet):
-    homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+    homepage = puppet["driver"].get_homepage_recommendations(scroll_times=6)
     add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
     return homepage
 
@@ -75,7 +68,7 @@ def watch(puppet, video: Video, duration):
     try:
         driver.play(video, duration=duration)
     except VideoUnavailableException as e:
-        logger.info("Skipping unavailable video")
+        logging.info("Skipping unavailable video")
     add_action(puppet, "watch", video.videoId)
 
 def save_puppet(puppet, args):
@@ -83,21 +76,22 @@ def save_puppet(puppet, args):
         puppet_id=puppet["puppetId"],
         start_time=puppet["start_time"],
         end_time=datetime.now(),
-        duration=puppet["duration"],
-        description=puppet["description"],
+        duration=puppet.get("duration", 0),
+        description=puppet.get("description", ""),
         actions=puppet["actions"],
         rounds=puppet["rounds"],
         args=args,
         harmful_exposure=puppet.get("harmful_exposure", [])
     )
-    with open(os.path.join(makedir(args["outputDir"], "puppets"), puppet["puppetId"]), "w") as f:
+    puppet_file = os.path.join(makedir(args["outputDir"], "puppets"), puppet["puppetId"])
+    with open(puppet_file, "w") as f:
         json.dump(js, f, default=str, indent=4)
+    logging.info(f"Saved puppet state to {puppet_file}")
 
 def extract_recommendations(puppet):
-    logger.info(f"Puppet state in extract_recommendations: {puppet}")
+    logging.info(f"Extracting recommendations for puppet {puppet['puppetId']}")
     upnext_recommendations = []
     homepage_recommendations = []
-    
     for action in reversed(puppet["actions"]):
         if action["action"] == "get_upnext_recommendations" and not upnext_recommendations:
             upnext_recommendations = action["params"] or []
@@ -105,23 +99,45 @@ def extract_recommendations(puppet):
             homepage_recommendations = action["params"] or []
         if upnext_recommendations and homepage_recommendations:
             break
-    
     upnext_recommendations = upnext_recommendations[:12]
     homepage_recommendations = homepage_recommendations[:25]
-    
     return upnext_recommendations, homepage_recommendations
 
+def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=None, metadata_entries=None):
+    log_file = os.path.join(metadata_dir, "experiment_log.json")
+    data = {"rounds": []}
+    if os.path.exists(log_file):
+        with open(log_file, "r") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                logging.warning(f"Corrupted experiment log {log_file}, starting fresh")
+    
+    round_data = {
+        "round_number": round_num,
+        "focus": focus,
+        "recommendations": video_ids,
+        "predictions": predictions if predictions is not None else [None] * len(video_ids),
+        "metadata": metadata_entries if metadata_entries is not None else []
+    }
+    data["rounds"].append(round_data)
+    
+    with tempfile.NamedTemporaryFile(mode="w", dir=metadata_dir, delete=False) as tmp_file:
+        json.dump(data, tmp_file, default=str, indent=4)
+    os.replace(tmp_file.name, log_file)
+    logging.info(f"Appended experiment log for round {round_num} to {log_file}")
+
 def train(puppet, args):
-    logger.info(f"Puppet state at start of train: {puppet}")
+    logging.info(f"Starting training for puppet {puppet['puppetId']}")
     get_homepage(puppet)
     add_action(puppet, "training_start")
     
     screenshots_dir = os.path.join(args['outputDir'], 'screenshots', args['puppetId'])
     os.makedirs(screenshots_dir, exist_ok=True)
     training = args.get("training", [])
-    logger.info("Training videos received: %s", training)
+    logging.info("Training videos received: %s", training)
     if not training:
-        logger.warning("No training videos provided. Training phase will be skipped.")
+        logging.warning("No training videos provided. Training phase will be skipped.")
         return
     
     training_videos = [videoId for videoId in training if len(videoId) > 0]
@@ -130,25 +146,35 @@ def train(puppet, args):
     last_video = None
     
     for videoId in training_videos:
-        logger.info(f"Loading video: {videoId}")
+        logging.info(f"Loading video: {videoId}")
         if watched >= trainingN:
             break
-        try:
-            video = Video(None, make_url(videoId))
-            watch(puppet, video, args["duration"])
-            last_video = video
-            watched += 1
-        except VideoUnavailableException:
-            continue
-        except Exception as e:
-            logger.exception(e)
-            
+        for attempt in range(3):
+            logging.info(f"Attempt {attempt + 1} to watch video {videoId}")
+            try:
+                video = Video(None, make_url(videoId))
+                watch(puppet, video, args["duration"])
+                last_video = video
+                watched += 1
+                break
+            except (VideoUnavailableException, TimeoutException, WebDriverException):
+                logging.info(f"Attempt {attempt + 1} failed for video {videoId}")
+                puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"error_{videoId}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+                if attempt == 2:
+                    logging.info(f"Skipping unavailable video")
+                    break
+                time.sleep(10)
+            except Exception as e:
+                logging.exception(e)
+                logging.info(f"Unrecoverable error for video {videoId}")
+                break
+                
     add_action(puppet, "training_end")
     
     experiment_dir = os.path.join(args['outputDir'], args['puppetId'])
     metadata_dir = os.path.join(experiment_dir, "metadata")
     os.makedirs(metadata_dir, exist_ok=True)
-    metadata_extractor = MetadataExtractor(output_dir=metadata_dir, timeout=60, max_workers=10)
+    metadata_extractor = MetadataExtractor(output_dir=metadata_dir, timeout=60, max_workers=4)
     if last_video is not None:
         retry_upnext = 0
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -156,30 +182,30 @@ def train(puppet, args):
         up_next = puppet["driver"].get_upnext_recommendations(topn=12)
         add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in up_next])
         up_next_ids = [vid.videoId for vid in up_next]
-        metadata_extractor.extract_metadata_batch(up_next_ids, filename="metadata_upnext_round_0.csv")
-    else:
-        raise Exception("No video to get recommendations from.")
+        metadata = metadata_extractor.extract_metadata_batch(up_next_ids)
+        save_experiment_log(metadata_dir, 0, "up-next", up_next_ids, [0.0] * len(up_next_ids), metadata)
     
-    homepage = puppet["driver"].get_homepage_recommendations(scroll_times=4)
+    homepage = puppet["driver"].get_homepage_recommendations(scroll_times=6)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     puppet["driver"].save_screenshot(os.path.join(screenshots_dir, f"homepage_first_attempt_{timestamp}.png"))
     add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in homepage])
-    homepage_ids = [vid.videoId for vid in homepage]
-    metadata_extractor.extract_metadata_batch(homepage_ids, filename="metadata_homepage_round_0.csv")
-    logger.info(f"Puppet state at end of train: {puppet}")
+    homepage_ids = [vid.videoId for vid in homepage[:25]]
+    metadata = metadata_extractor.extract_metadata_batch(homepage_ids)
+    save_experiment_log(metadata_dir, 0, "homepage", homepage_ids, [0.0] * len(homepage_ids), metadata)
+    logging.info(f"Completed training for puppet {puppet['puppetId']}")
 
 def intervention(puppet, args, initial_upnext=None, initial_homepage=None):
     try:
         if "intervention_type" in args:
-            logger.info("Starting recommendation intervention experiment")
-            logger.info(f"Puppet state before intervention start: {puppet}")
+            logging.info("Starting recommendation intervention experiment")
+            logging.info(f"Starting intervention for puppet {puppet['puppetId']}")
             add_action(puppet, "intervention_start")
             from intervention import run_intervention
             focus = args.get("focus", "homepage")
-            run_intervention(args, puppet, logger=logger, initial_upnext=initial_upnext, initial_homepage=initial_homepage, focus=focus)
-            logger.info("Recommendation intervention experiment completed")
+            run_intervention(args, puppet, logger=logging, initial_upnext=initial_upnext, initial_homepage=initial_homepage, focus=focus)
+            logging.info("Recommendation intervention experiment completed")
     except Exception as e:
-        logger.exception(f"Error in intervention step: {e}")
+        logging.exception(f"Error in intervention step: {e}")
         raise
 
 if __name__ == "__main__":
@@ -223,7 +249,7 @@ if __name__ == "__main__":
         puppet["steps"] = args["steps"]
         puppet["duration"] = args["duration"]
         puppet["description"] = args["description"]
-        logger.info(f"Puppet state before save: {puppet}")
+        logger.info(f"Saving puppet state for {puppet['puppetId']}")
         save_puppet(puppet, args)
         puppet["driver"].close()
         logger.info('sock puppet finished')

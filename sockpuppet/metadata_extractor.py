@@ -1,5 +1,8 @@
 """
-Extract metadata from YouTube videos for classification, including transcripts.
+YouTube Video Metadata Extraction Module
+
+Extract metadata and transcripts from YouTube videos for classification,
+storing results in JSON format for integration with experiment logging.
 """
 
 import os
@@ -12,12 +15,14 @@ import pandas as pd
 import re
 
 class MetadataExtractor:
-    """Extract metadata and transcripts from YouTube videos using yt-dlp"""
-    
-    def __init__(self, output_dir, timeout=60, max_workers=10):
+    """
+    Extract metadata and transcripts from YouTube videos using yt-dlp.
+    """
+
+    def __init__(self, output_dir, timeout=60, max_workers=4):
         """
-        Initialize the extractor
-        
+        Initialize the extractor.
+
         Args:
             output_dir: Directory to save metadata
             timeout: Maximum time (seconds) for video processing
@@ -33,17 +38,16 @@ class MetadataExtractor:
         
         # Set up logger
         self.logger = logging.getLogger(__name__)
-    
-    def extract_metadata_batch(self, video_ids, filename):
+
+    def extract_metadata_batch(self, video_ids):
         """
-        Extract metadata and transcripts for multiple videos
-        
+        Extract metadata and transcripts for multiple videos and return as a list of dictionaries.
+
         Args:
             video_ids: List of YouTube video IDs
-            filename: Name of the output CSV file
-            
+
         Returns:
-            Path to the CSV file with metadata
+            List of dictionaries containing metadata for each video
         """
         self.logger.info(f"Extracting metadata and transcripts for {len(video_ids)} videos")
         
@@ -54,21 +58,29 @@ class MetadataExtractor:
         self.logger.info(f"{len(to_process)}/{len(video_ids)} videos need processing")
         
         if to_process:
-            # Process videos
+            # Process videos concurrently
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [executor.submit(self._process_video, vid) for vid in to_process]
                 
                 for future in tqdm(futures, desc="Processing videos"):
                     future.result()
                     
-        # Create metadata CSV
-        self.logger.info("Creating metadata CSV")
-        csv_path = self._create_metadata_csv(video_ids, filename)
+        # Collect metadata into a list
+        self.logger.info("Collecting metadata into list")
+        metadata_list = self._collect_metadata(video_ids)
         
-        return csv_path
-    
+        return metadata_list
+
     def _process_video(self, video_id):
-        """Download metadata for a single video"""
+        """
+        Download metadata for a single video.
+
+        Args:
+            video_id: YouTube video ID
+
+        Returns:
+            Video ID if successful, None otherwise
+        """
         output_path = f'{self.metadata_dir}/{video_id}.json'
         
         try:
@@ -93,9 +105,15 @@ class MetadataExtractor:
         except Exception as e:
             self.logger.error(f"Error processing {video_id}: {e}")
             return None
-    
+
     def _extract_transcript(self, video_id, json_path):
-        """Extract transcript using optimized yt-dlp command and add it to the metadata file"""
+        """
+        Extract transcript using optimized yt-dlp command and add it to the metadata file.
+
+        Args:
+            video_id: YouTube video ID
+            json_path: Path to the JSON metadata file
+        """
         try:
             # Read metadata file
             with open(json_path, 'r') as f:
@@ -139,7 +157,7 @@ class MetadataExtractor:
                         transcript = re.sub(r'\s+', ' ', transcript)
                 else:
                     transcript = ""
-                    self.logger.warning(f"No transcript found for {video_id}")
+                    # self.logger.warning(f"No transcript found for {video_id}")
             
             # Add transcript to metadata and save
             metadata['transcript'] = transcript
@@ -155,17 +173,25 @@ class MetadataExtractor:
             metadata['transcript'] = ""
             with open(json_path, 'w') as f:
                 json.dump(metadata, f)
-    
-    def _create_metadata_csv(self, video_ids, filename):
-        """Create CSV with metadata for specified video IDs"""
-        records = []
+
+    def _collect_metadata(self, video_ids):
+        """
+        Collect metadata for specified video IDs into a list of dictionaries.
+
+        Args:
+            video_ids: List of YouTube video IDs
+
+        Returns:
+            List of metadata dictionaries
+        """
+        metadata_list = []
         
         for video_id in video_ids:
             json_path = f'{self.metadata_dir}/{video_id}.json'
             
             if not os.path.exists(json_path):
                 # Add minimal record if file doesn't exist
-                records.append({
+                metadata_list.append({
                     'links': f"https://youtube.com/watch?v={video_id}",
                     'video_id': video_id,
                     'channel': '',
@@ -190,11 +216,11 @@ class MetadataExtractor:
                     'date': metadata.get('upload_date', '')
                 }
                 
-                records.append(record)
+                metadata_list.append(record)
                 
             except Exception as e:
                 self.logger.error(f"Error reading metadata for {video_id}: {e}")
-                records.append({
+                metadata_list.append({
                     'links': f"https://youtube.com/watch?v={video_id}",
                     'video_id': video_id,
                     'channel': '',
@@ -204,12 +230,5 @@ class MetadataExtractor:
                     'date': ''
                 })
         
-        # Create DataFrame and save to CSV
-        df = pd.DataFrame(records)
-        csv_path = os.path.join(self.output_dir, filename)
-        df.to_csv(csv_path, index=False)
-        
-        # Print summary
-        self.logger.info(f"Created metadata CSV with {len(df)} records")
-        
-        return csv_path
+        self.logger.info(f"Collected metadata for {len(metadata_list)} videos")
+        return metadata_list

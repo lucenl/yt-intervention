@@ -15,12 +15,12 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
 ARGS_DIR = os.path.join(os.getcwd(), 'arguments')
 
-NUM_TRAINING_VIDEOS = 100
-WATCH_DURATION = 30
+NUM_TRAINING_VIDEOS = 5
+WATCH_DURATION = 5
 USERNAME = os.getuid()
 
-PERCENTAGE_GROUPS = [0, 5, 30, 50, 70]
-PUPPETS_PER_GROUP = 33
+PERCENTAGE_GROUPS = [50]
+PUPPETS_PER_GROUP = 5
 HARMLESS_RESERVOIR_SIZE = 10
 
 def parse_args():
@@ -57,9 +57,14 @@ def parse_args():
         help="Path to the training videos folder",
     )
     parser.add_argument(
-        "--model-path",
+        "--binary-model-path",
         default="/app/models/roberta_checkpoint",
-        help="Path to the RoBERTa model checkpoint inside container",
+        help="Path to the binary RoBERTa model checkpoint inside container",
+    )
+    parser.add_argument(
+        "--multiclass-model-path",
+        default="/app/models/multicalss_checkpoint",
+        help="Path to the multiclass RoBERTa model checkpoint inside container",
     )
     parser.add_argument(
         "--intervention-types",
@@ -95,9 +100,14 @@ def parse_args():
     )
     parser.add_argument(
         "--focus",
-        default=["homepage"],
+        default="homepage",
         choices=["homepage", "up-next", "both"],
         help="Focus on recommendations (homepage, up-next, or both)"
+    )
+    parser.add_argument(
+        "--dump",
+        default=False,
+        help="Dump recommendations to file",
     )
     
     args = parser.parse_args()
@@ -111,7 +121,8 @@ def get_mount_volumes():
     return {
         OUTPUT_DIR: {"bind": "/output"},
         LOGS_DIR: {"bind": "/logs"},
-        os.path.abspath("roberta/checkpoint"): {"bind": "/app/models/roberta_checkpoint"}
+        os.path.abspath("roberta/binary"): {"bind": "/app/models/roberta_checkpoint"},
+        os.path.abspath("roberta/multiclass"): {"bind": "/app/models/multicass_checkpoint"}
     }
 
 def max_containers_reached(client, max_containers):
@@ -220,11 +231,7 @@ def spawn_intervention_containers(client, args):
         puppet_ids = [os.path.splitext(f)[0] for f in puppet_files]
         total_experiments = len(puppet_ids) * len(args.intervention_types)
         print(f"Found {len(puppet_ids)} puppets in folder {puppet_folder}")
-    else:
-        total_experiments = args.puppets_per_group * len(args.harmful_percentages) * len(args.intervention_types)
-        print(f"Generating new puppets for intervention")
-    print(f"Preparing to run {total_experiments} intervention experiments")
-    
+   
     for idx, intervention_type in enumerate(args.intervention_types):
         for focux_idx, focus_type in enumerate(args.focus):
             if args.puppet_folder:
@@ -264,7 +271,8 @@ def spawn_intervention_containers(client, args):
                         "training": training_videos,
                         "trainingN": puppet_data.get("args", {}).get("trainingN", NUM_TRAINING_VIDEOS),
                         "testSeed": puppet_data.get("args", {}).get("testSeed", str(uuid4())),
-                        "harmless_reservoir": harmless_reservoir
+                        "harmless_reservoir": harmless_reservoir,
+                        "dump": args.dump
                     }
                     print(f"Starting intervention experiment {count + 1}/{total_experiments}: {puppet_id}_intervention_{intervention_type}_{focus_type}")
                     if not args.simulate:
@@ -273,7 +281,7 @@ def spawn_intervention_containers(client, args):
                             IMAGE_NAME, command, volumes=get_mount_volumes(), shm_size="1G", remove=True, detach=True
                         )
                     count += 1
-                    sleep(3)
+                    sleep(5)
             else:
                 raise FileNotFoundError(f'No puppet folder found. Please train puppets first before for intervention')
     
@@ -318,16 +326,17 @@ def spawn_combined_containers(client, args):
                     "training": training,
                     "trainingN": NUM_TRAINING_VIDEOS,
                     "testSeed": test_seed,
-                    "harmless_reservoir": harmless_reservoir
+                    "harmless_reservoir": harmless_reservoir,
+                    "dump": args.dump
                 }
-                print(f"Starting combined experiment {count + 1}/{total_experiments}: {puppet_id}_combined_{intervention_type} with training: {training}")
+                print(f"Starting combined experiment {count + 1}/{total_experiments}: {puppet_id}_combined_{intervention_type}")
                 if not args.simulate:
                     command = ["python", "sockpuppet.py", json.dumps(experiment_args)]
                     container = client.containers.run(
                         IMAGE_NAME, command, volumes=get_mount_volumes(), shm_size="1G", remove=True, detach=True
                     )
                 count += 1
-                sleep(3)
+                sleep(5)
     print(f"Launched {count} combined experiments")
 
 def main():
