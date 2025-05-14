@@ -1,35 +1,74 @@
+"""
+RoBERTa-Based Video Content Classification Module
+
+This module provides classification of YouTube video content using RoBERTa models,
+optimized for speed and compatibility with JSON-based experiment logging.
+It includes a binary classifier for harm detection and a multiclass classifier
+for categorizing harmful content.
+"""
+
 from transformers import RobertaForSequenceClassification, RobertaTokenizer, Trainer
-from datasets import load_dataset
 import torch
 from scipy.special import softmax
 from concurrent.futures import ThreadPoolExecutor
-from metadata_extractor import MetadataExtractor
 import logging
-import os
 import numpy as np
-from datetime import datetime
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+from torch.utils.data import DataLoader, Dataset
+from typing import List, Optional
 
-"""
-Classification module using RoBERTa model
-"""
-class RoBERTaClassifier:
-    """Classification using RoBERTa model"""
-    
-    def __init__(self, model_path, threshold=0.5, logger=None):
+class RoBERTaTextDataset(Dataset):
+    """
+    Custom Dataset for RoBERTa classification.
+    """
+    def __init__(self, texts, tokenizer, max_length):
         """
-        Initialize classifier
-        
+        Initialize the dataset with texts for classification.
+
+        Args:
+            texts: List of text strings to classify
+            tokenizer: RoBERTa tokenizer
+            max_length: Maximum sequence length
+        """
+        self.encodings = tokenizer(texts, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+    
+    def __len__(self):
+        """
+        Return the number of samples in the dataset.
+        """
+        return len(self.encodings["input_ids"])
+    
+    def __getitem__(self, idx):
+        """
+        Get a sample from the dataset.
+
+        Args:
+            idx: Index of the sample
+
+        Returns:
+            Dictionary of encoded inputs
+        """
+        return {key: val[idx] for key, val in self.encodings.items()}
+
+class RoBERTaClassifier:
+    """
+    Binary classification using RoBERTa model with optimized inference.
+    """
+
+    def __init__(self, model_path, threshold=0.8, logger=None, batch_size=64):
+        """
+        Initialize classifier.
+
         Args:
             model_path: Path to RoBERTa model checkpoint
-            threshold: Classification threshold
+            threshold: Classification threshold for harmful content
             logger: Optional logger
+            batch_size: Batch size for inference
         """
         self.model_path = model_path
         self.threshold = threshold
         self.logger = logger or logging.getLogger(__name__)
+        self.batch_size = batch_size
         
         # Load model and tokenizer
         self.logger.info(f"Loading RoBERTa model from {model_path}")
@@ -37,117 +76,196 @@ class RoBERTaClassifier:
         self.tokenizer = RobertaTokenizer.from_pretrained("roberta-large")
         self.max_len = self.tokenizer.model_max_length
         
-        # Set up device
+        # Set up device and model for inference
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
-        self.logger.info(f"Using device: {self.device}")
-    
-    def classify_from_csv(self, csv_path):
+        self.model.eval()  # Set to evaluation mode
+        self.logger.info(f"Using device: {self.device} with batch size: {self.batch_size}")
+
+    def _classify_batch(self, texts: List[str]) -> np.ndarray:
         """
-        Classify videos from CSV file
-        
+        Classify a batch of texts efficiently.
+
         Args:
-            csv_path: Path to CSV with video metadata
-            
+            texts: List of text strings to classify
+
         Returns:
-            DataFrame with predictions added
+            Array of harm scores (probabilities)
         """
-        self.logger.info(f"Classifying videos from {csv_path}")
+        dataset = RoBERTaTextDataset(texts, self.tokenizer, self.max_len)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+
+        all_probs = []
+        with torch.no_grad():  # Disable gradient computation for inference
+            for batch in dataloader:
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                
+                outputs = self.model(input_ids, attention_mask=attention_mask)
+                probs = softmax(outputs.logits.cpu().numpy(), axis=1)
+                all_probs.append(probs[:, 1])  # Harm score is the positive class probability
         
-        # Load dataset
-        dataset = load_dataset("csv", data_files={"test": csv_path}, split="test")
-        
-        # Tokenize
-        def tokenize_fn(examples):
-            ds = examples.get("description", [""] * len(examples["title"]))
-            ts = examples.get("transcript", [""] * len(examples["title"]))
-            texts = []
-            for t, d, tr in zip(examples["title"], ds, ts):
-                t = t or ""
-                d = d or ""
-                tr = tr or ""
-                texts.append(f"{t} {d} {tr}".strip())
-            return self.tokenizer(texts, padding="max_length", truncation=True, max_length=self.max_len)
-        
-        tokenized_dataset = dataset.map(tokenize_fn, batched=True)
-        tokenized_dataset.set_format("torch", columns=["input_ids", "attention_mask"])
-        
-        # Run prediction
-        trainer = Trainer(model=self.model)
-        pred_output = trainer.predict(tokenized_dataset)
-        
-        # Process predictions
-        logits = pred_output.predictions
-        probs = softmax(logits, axis=1)
-        preds = (probs[:, 1] > self.threshold).astype(int)
-        
-        # Add predictions to original data
-        df = pd.read_csv(csv_path)
-        df['harm_score'] = probs[:, 1]
-        df['prediction'] = preds
-        
-        # Save results
-        results_path = os.path.splitext(csv_path)[0] + "_classified.csv"
-        df.to_csv(results_path, index=False)
-        
-        self.logger.info(f"Classification complete. Found {df['prediction'].sum()} harmful videos out of {len(df)}")
-        
-        return df
-    
-    def classify_video_list(self, videos, video_metadata=None):
+        return np.concatenate(all_probs)
+
+    def classify_video_list(self, videos: List, video_metadata: Optional[List[dict]] = None) -> List[float]:
         """
-        Classify a list of videos
-        
+        Classify a list of videos using provided metadata.
+
         Args:
             videos: List of Video objects
-            video_metadata: Optional pre-loaded metadata DataFrame
-            
+            video_metadata: Optional list of metadata dictionaries
+
         Returns:
-            List of harm scores
+            List of harm scores for each video
         """
-        # Get video IDs
         video_ids = [v.videoId for v in videos]
-        
-        if video_metadata is not None:
-            # Use pre-loaded metadata
-            df = video_metadata
-            
-            # Filter to just the videos we need
-            df = df[df['video_id'].isin(video_ids)]
-            
-            # Keep original order
-            df = pd.DataFrame([df[df['video_id'] == vid].iloc[0] if vid in df['video_id'].values else None 
-                             for vid in video_ids])
-            
-        else:
-            # Create temporary metadata file
-            temp_df = pd.DataFrame({
-                'links': [f"https://youtube.com/watch?v={vid}" for vid in video_ids],
-                'video_id': video_ids,
-                'title': [getattr(v, 'title', '') for v in videos],
-                'description': [''] * len(videos),
-                'transcript': [''] * len(videos)
-            })
-            
-            temp_path = "temp_classification.csv"
-            temp_df.to_csv(temp_path, index=False)
-            
-            # Use our classification function
-            df = self.classify_from_csv(temp_path)
-            
-            # Clean up
-            os.remove(temp_path)
-        
-        # Get harm scores in the same order as input videos
+
+        if video_metadata is None:
+            self.logger.warning("No metadata provided, defaulting to empty metadata")
+            video_metadata = [
+                {
+                    'video_id': vid,
+                    'title': getattr(v, 'title', ''),
+                    'description': '',
+                    'transcript': ''
+                }
+                for v, vid in zip(videos, video_ids)
+            ]
+
+        # Convert metadata list to DataFrame and ensure order matches input videos
+        df = pd.DataFrame(video_metadata)
+        df = pd.DataFrame([
+            df[df['video_id'] == vid].iloc[0] if vid in df['video_id'].values else 
+            {'video_id': vid, 'title': '', 'description': '', 'transcript': ''} 
+            for vid in video_ids
+        ])
+
+        # Prepare texts for classification
+        texts = [f"{row['title']} {row['description']} {row['transcript']}".strip() 
+                 for _, row in df.iterrows()]
+
+        # Parallel processing of batches
+        def process_batch(batch_texts):
+            return self._classify_batch(batch_texts)
+
         harm_scores = []
-        for video_id in video_ids:
-            matching_rows = df[df['video_id'] == video_id]
-            if len(matching_rows) > 0:
-                harm_scores.append(float(matching_rows.iloc[0]['harm_score']))
-            else:
-                # Default to threshold if video not found
-                harm_scores.append(self.threshold)
-        
+        with ThreadPoolExecutor() as executor:
+            # Split texts into batches for parallel processing
+            batches = [texts[i:i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
+            results = list(executor.map(process_batch, batches))
+            for result in results:
+                harm_scores.extend(result)
+
+        # Ensure length matches input videos
+        if len(harm_scores) < len(video_ids):
+            harm_scores.extend([self.threshold] * (len(video_ids) - len(harm_scores)))
+
         return harm_scores
 
+    def classify_batch(self, metadata_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Classify a batch of metadata entries and add harm scores.
 
+        Args:
+            metadata_df: DataFrame containing metadata with 'video_id', 'title', 'description', 'transcript'
+
+        Returns:
+            DataFrame with an additional 'harm_score' column
+        """
+        # Prepare texts for classification
+        texts = [f"{row['title']} {row['description']} {row['transcript']}".strip() 
+                 for _, row in metadata_df.iterrows()]
+        
+        # Classify texts
+        harm_scores = self._classify_batch(texts)
+        
+        # Add harm scores to DataFrame
+        metadata_df['harm_score'] = harm_scores
+        return metadata_df
+
+class MulticlassClassifier:
+    """
+    Multiclass classification using RoBERTa model to categorize harmful videos.
+    """
+    def __init__(self, model_path, category_mapping=None, logger=None):
+        """
+        Initialize multiclass classifier.
+
+        Args:
+            model_path: Path to RoBERTa multiclass model checkpoint
+            category_mapping: Dict mapping class indices to category names (e.g., {0: "Violence", 1: "Hate Speech"})
+            logger: Optional logger
+        """
+        self.model_path = model_path
+        self.logger = logger or logging.getLogger(__name__)
+        self.category_mapping = category_mapping or {0: "HH", 1: "SXL", 2: "PH"}
+        
+        # Load model and tokenizer
+        self.logger.info(f"Loading multiclass RoBERTa model from {model_path}")
+        self.model = RobertaForSequenceClassification.from_pretrained(model_path, local_files_only=True)
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_path, local_files_only=True)
+        self.trainer = Trainer(model=self.model)
+        self.max_len = self.tokenizer.model_max_length
+        
+        # Set up device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.logger.info(f"Using device: {self.device} for multiclass classification")
+
+    def tokenize_fn(self, examples):
+        """
+        Tokenize metadata for multiclass classification.
+
+        Args:
+            examples: Dict with 'title', 'description', 'transcript' lists
+
+        Returns:
+            Tokenized inputs
+        """
+        ds = examples.get("description", [""] * len(examples["title"]))
+        ts = examples.get("transcript", [""] * len(examples["title"]))
+        texts = [f"{t} {d} {tr}" for t, d, tr in zip(examples["title"], ds, ts)]
+        return self.tokenizer(texts, padding="max_length", truncation=True, max_length=self.max_len)
+
+    def classify_batch(self, metadata_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Classify a batch of metadata entries and add category labels.
+
+        Args:
+            metadata_df: DataFrame containing metadata with 'video_id', 'title', 'description', 'transcript'
+
+        Returns:
+            DataFrame with an additional 'category' column
+        """
+        # Convert DataFrame to a dictionary format expected by tokenize_fn
+        examples = {
+            "title": metadata_df["title"].tolist(),
+            "description": metadata_df["description"].tolist(),
+            "transcript": metadata_df["transcript"].tolist()
+        }
+        # Tokenize
+        tokenized = self.tokenize_fn(examples)
+        # Prepare dataset for Trainer
+        class DatasetWrapper(torch.utils.data.Dataset):
+            def __init__(self, encodings):
+                self.encodings = encodings
+
+            def __getitem__(self, idx):
+                return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+
+            def __len__(self):
+                return len(self.encodings["input_ids"])
+
+        dataset = DatasetWrapper({
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"]
+        })
+        # Predict
+        pred_out = self.trainer.predict(dataset)
+        logits = pred_out.predictions
+        preds = np.argmax(logits, axis=1)
+        categories = [self.category_mapping[pred] for pred in preds]
+        return pd.DataFrame({
+            "video_id": metadata_df["video_id"],
+            "category": categories
+        })

@@ -18,7 +18,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from metadata_extractor import MetadataExtractor
-from roberta_classifier import RoBERTaClassifier
+from roberta_classifier import RoBERTaClassifier, MulticlassClassifier
 import traceback
 import tempfile
 
@@ -63,7 +63,8 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     # Extract parameters
     puppet_id = args["puppetId"]
     output_dir = args.get("outputDir", "/output")
-    model_path = args.get("model_path", "/app/models/roberta_checkpoint")
+    binary_model_path = args.get("model_path", "/app/models/roberta_checkpoint")
+    multiclass_model_path = args.get("multiclass_model_path", "/app/models/multiclass_checkpoint")
     intervention_type = args.get("intervention_type", "none")
     selection_type = args.get("selection_type", "decay_weighted_random")
     num_rounds = int(args.get("rounds", 10))
@@ -91,16 +92,27 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
     )
     
     # Initialize classifier if model path provided
-    classifier = None
-    if model_path:
+    binary_classifier = None
+    multiclass_classifier = None
+    if binary_model_path:
         try:
-            classifier = RoBERTaClassifier(
-                model_path=model_path,
+            binary_classifier = RoBERTaClassifier(
+                model_path=binary_model_path,
                 threshold=harm_threshold,
                 logger=logger
             )
         except Exception as e:
             logger.error(f"Error initializing classifier: {e}")
+            raise
+    if multiclass_model_path:
+        try:
+            multiclass_classifier = MulticlassClassifier(
+                model_path=multiclass_model_path,
+                category_mapping={0: "HH", 1: "SXL", 2: "PH"},
+                logger=logger
+            )
+        except Exception as e:
+            logger.error(f"Error initializing multiclass classifier: {e}")
             raise
     
     # Initialize puppet if not provided
@@ -168,12 +180,13 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
             # Step 4: Classify recommendations
             harmful_pct = 0
             harm_scores = [0.0] * len(recommendations)
+            category_labels = [""] * len(recommendations)
             harmful_count = 0
-            if classifier:
+            if binary_classifier:
                 metadata_entries = prev_round_data["metadata"]
                 metadata_df = pd.DataFrame(metadata_entries)
                 # Binary classification
-                classified_df = classifier.classify_batch(metadata_df)
+                classified_df = binary_classifier.classify_batch(metadata_df)
                 harm_scores = [classified_df[classified_df['video_id'] == vid]['harm_score'].iloc[0] for vid in video_ids]
                 harmful_count = sum(1 for score in harm_scores if score > harm_threshold)
                 harmful_pct = (harmful_count / len(recommendations)) * 100 if recommendations else 0
@@ -190,8 +203,18 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                             category = multiclass_results[multiclass_results['video_id'] == video_id]['category'].iloc[0]
                             category_labels[idx] = category
                             logger.info(f"Video {video_id} classified as harmful with category: {category}")
+            # Update the previous round's log entry with classification results
+            for round_data in data["rounds"]:
+                if round_data["round_number"] == prev_round and round_data["focus"] == focus:
+                    round_data["predictions"] = harm_scores
+                    round_data["categories"] = category_labels
+                    break
+            # Write the updated log back to the file
+            with tempfile.NamedTemporaryFile(mode="w", dir=metadata_dir, delete=False) as tmp_file:
+                json.dump(data, tmp_file, default=str, indent=4)
+            os.replace(tmp_file.name, log_file)
+            logger.info(f"Updated experiment log for round {prev_round} with classification results")
             
-                
             
             # Step 5: Rerank using intervention strategy
             modified_recommendations = recommendations.copy()
@@ -217,7 +240,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         else:
                             logger.warning(f"No suitable replacement found for harmful video {video.videoId} (score: {score})")
                 logger.info(f"Modified recommendations: {[vid.videoId for vid in modified_recommendations]}")
-    
+
             # Step 6: Select video to watch
             if not modified_recommendations:
                 logger.warning("No videos available to select. Terminating intervention.")
@@ -280,26 +303,15 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         recommendations = recommendations[:25]  # Trim to 25 as in training
                         logger.info(f"Trimmed to {len(recommendations)} homepage recommendations")
                         add_action(puppet, "get_homepage_recommendations", [vid.videoId for vid in recommendations])
-                        video_ids = [video.videoId for video in recommendations]
-                        metadata = metadata_extractor.extract_metadata_batch(video_ids)
-                        if classifier:
-                            metadata_df = pd.DataFrame(metadata)
-                            harm_scores = classifier.classify_batch(metadata_df)['harm_score'].tolist()
-                        else:
-                            harm_scores = [0.0] * len(video_ids)
-                        save_experiment_log(metadata_dir, round_num, focus, video_ids, harm_scores, metadata)
                     elif focus == "up-next":
                         recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
                         logger.info(f"Got {len(recommendations)} up-next recommendations")
                         add_action(puppet, "get_upnext_recommendations", [vid.videoId for vid in recommendations])
-                        video_ids = [video.videoId for video in recommendations]
-                        metadata = metadata_extractor.extract_metadata_batch(video_ids)
-                        if classifier:
-                            metadata_df = pd.DataFrame(metadata)
-                            harm_scores = classifier.classify_batch(metadata_df)['harm_score'].tolist()
-                        else:
-                            harm_scores = [0.0] * len(video_ids)
-                        save_experiment_log(metadata_dir, round_num, focus, video_ids, harm_scores, metadata)
+                    
+                    video_ids = [video.videoId for video in recommendations]
+                    metadata = metadata_extractor.extract_metadata_batch(video_ids)
+                    # Save without classifications; they'll be done in Step 2 of the next round
+                    save_experiment_log(metadata_dir, round_num, focus, video_ids, None, metadata, None)
     
             except Exception as e:
                 logger.error(f"Error watching video: {str(e)}\n{traceback.format_exc()}")
@@ -357,7 +369,7 @@ def add_action(puppet, action, params=None):
         "timestamp": datetime.now().isoformat()
     })
 
-def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=None, metadata_entries=None):
+def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=None, metadata_entries=None, category_labels=None):
     """
     Save experiment data (recommendations, predictions, metadata) to a unified JSON log file.
 
@@ -383,7 +395,8 @@ def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=N
         "focus": focus,
         "recommendations": video_ids,
         "predictions": predictions if predictions is not None else [None] * len(video_ids),
-        "metadata": metadata_entries if metadata_entries is not None else []
+        "metadata": metadata_entries if metadata_entries is not None else [],
+        "categories": category_labels if category_labels is not None else [""] * len(video_ids)
     }
     data["rounds"].append(round_data)
     
@@ -395,27 +408,72 @@ def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=N
 
 def generate_visualization(puppet, output_dir):
     """
-    Generate a visualization of harmful content exposure over rounds.
+    Generate visualizations of harmful content exposure and category distribution over rounds.
 
     Args:
         puppet: Puppet object containing harmful exposure data
-        output_dir: Directory to save the visualization
+        output_dir: Directory to save the visualizations
     """
     os.makedirs(output_dir, exist_ok=True)
     exposure_data = puppet.get('harmful_exposure', [])
     if not exposure_data:
         return
-    rounds = [d.get('round', i+1) for i, d in enumerate(exposure_data)]
-    harmful_counts = [d.get('harmful_count', 0) for d in exposure_data]
+    
+    # Existing line plot for harmful exposure
+    rounds = [int(d.get('round', i+1)) for i, d in enumerate(exposure_data)]
+    harmful_counts = [int(d.get('harmful_count', 0)) for d in exposure_data]
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, harmful_counts, 'b-o', linewidth=2, label='Harmful Videos')
     plt.title(f"Harmful Content Exposure - {puppet['puppetId']}", fontsize=14)
     plt.xlabel('Round', fontsize=12)
-    plt.ylabel('Harmful Content', fontsize=12)
+    plt.ylabel('Harmful Content Count', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_exposure.png"), dpi=300, bbox_inches='tight')
+    plt.close()
 
+    # Collect category data from experiment log
+    experiment_log_path = os.path.join(output_dir, "..", "metadata", "experiment_log.json")
+    category_data = []
+    if os.path.exists(experiment_log_path):
+        with open(experiment_log_path, "r") as f:
+            data = json.load(f)
+        for round_data in data["rounds"]:
+            round_num = round_data["round_number"]
+            categories = round_data["categories"]
+            # Only collect categories from rounds 0 onward (after classification in Step 2)
+            if round_num >= 0:
+                for category in categories:
+                    if category:  # Only include non-empty categories (i.e., harmful videos)
+                        adjusted_round = int(round_num + 1) if round_num < len(data["rounds"]) - 1 else int(round_num)
+                        category_data.append({"round": adjusted_round, "category": category})
+
+    if category_data:
+        # Stacked bar chart for category distribution with annotations
+        category_df = pd.DataFrame(category_data)
+        category_counts = category_df.groupby(['round', 'category']).size().unstack(fill_value=0)
+        plt.figure(figsize=(10, 6))
+        ax = category_counts.plot(kind='bar', stacked=True, colormap='Pastel1', ax=plt.gca())
+        
+        # Add annotations on each segment
+        for i, bar in enumerate(ax.patches):
+            height = bar.get_height()
+            if height > 0:
+                x = bar.get_x() + bar.get_width() / 2
+                y = bar.get_y() + height / 2
+                ax.text(x, y, int(height), ha='center', va='center', fontsize=10, color='black')
+        
+        plt.title(f"Harmful Content Categories Over Rounds - {puppet['puppetId']}", fontsize=14)
+        plt.xlabel('Round', fontsize=12)
+        plt.ylabel('Number of Videos', fontsize=12)
+        plt.xticks(rotation=45)
+        plt.legend(title="Category")
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_category_distribution.png"), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        
 if __name__ == "__main__":
     """
     Entry point for running the intervention as a standalone script.
@@ -425,7 +483,8 @@ if __name__ == "__main__":
     parser.add_argument("--puppet-id", required=True, help="Puppet ID")
     parser.add_argument("--profile-dir", required=True, help="Path to puppet profile directory")
     parser.add_argument("--output-dir", default="/app/output", help="Output directory")
-    parser.add_argument("--model-path", help="Path to RoBERTa model checkpoint")
+    parser.add_argument("--model-path", default="/app/models/roberta_checkpoint", help="Path to RoBERTa model checkpoint")
+    parser.add_argument("--multiclass-model-path", default="/app/models/multiclass_checkpoint", help="Path to multiclass model checkpoint")
     parser.add_argument("--intervention", default="none", choices=["none", "downrank", "replace"],
                         help="Intervention strategy")
     parser.add_argument("--selection", default="decay_weighted_random", 
@@ -444,6 +503,7 @@ if __name__ == "__main__":
         "profile_dir": args.profile_dir,
         "outputDir": args.output_dir,
         "model_path": args.model_path,
+        "multiclass_model_path": args.multiclass_model_path,
         "intervention_type": args.intervention,
         "selection_type": args.selection,
         "rounds": args.rounds,

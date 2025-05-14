@@ -118,7 +118,8 @@ def save_experiment_log(metadata_dir, round_num, focus, video_ids, predictions=N
         "focus": focus,
         "recommendations": video_ids,
         "predictions": predictions if predictions is not None else [None] * len(video_ids),
-        "metadata": metadata_entries if metadata_entries is not None else []
+        "metadata": metadata_entries if metadata_entries is not None else [],
+        "categories": [""] * len(video_ids) 
     }
     data["rounds"].append(round_data)
     

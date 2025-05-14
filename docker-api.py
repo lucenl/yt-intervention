@@ -57,13 +57,13 @@ def parse_args():
         help="Path to the training videos folder",
     )
     parser.add_argument(
-        "--binary-model-path",
+        "--model-path",
         default="/app/models/roberta_checkpoint",
         help="Path to the binary RoBERTa model checkpoint inside container",
     )
     parser.add_argument(
         "--multiclass-model-path",
-        default="/app/models/multicalss_checkpoint",
+        default="/app/models/multiclass_checkpoint",
         help="Path to the multiclass RoBERTa model checkpoint inside container",
     )
     parser.add_argument(
@@ -122,7 +122,7 @@ def get_mount_volumes():
         OUTPUT_DIR: {"bind": "/output"},
         LOGS_DIR: {"bind": "/logs"},
         os.path.abspath("roberta/binary"): {"bind": "/app/models/roberta_checkpoint"},
-        os.path.abspath("roberta/multiclass"): {"bind": "/app/models/multicass_checkpoint"}
+        os.path.abspath("roberta/multiclass"): {"bind": "/app/models/multiclass_checkpoint"}
     }
 
 def max_containers_reached(client, max_containers):
