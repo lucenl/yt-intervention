@@ -20,6 +20,7 @@ import seaborn as sns
 from metadata_extractor import MetadataExtractor
 from roberta_classifier import RoBERTaClassifier, MulticlassClassifier
 import traceback
+from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 import tempfile
 
 def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initial_homepage=None, focus="homepage"):
@@ -182,7 +183,7 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
             harm_scores = [0.0] * len(recommendations)
             category_labels = [""] * len(recommendations)
             harmful_count = 0
-            if binary_classifier:
+            if intervention_type != 'None' and binary_classifier:
                 metadata_entries = prev_round_data["metadata"]
                 metadata_df = pd.DataFrame(metadata_entries)
                 # Binary classification
@@ -240,7 +241,10 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                         else:
                             logger.warning(f"No suitable replacement found for harmful video {video.videoId} (score: {score})")
                 logger.info(f"Modified recommendations: {[vid.videoId for vid in modified_recommendations]}")
-
+            elif intervention_type == 'none':
+                # No modification to recommendations
+                logger.info("No intervention applied, using original recommendations")
+                
             # Step 6: Select video to watch
             if not modified_recommendations:
                 logger.warning("No videos available to select. Terminating intervention.")
@@ -253,6 +257,8 @@ def run_intervention(args, puppet=None, logger=None, initial_upnext=None, initia
                 
             if selection_type == 'decay_weighted_random':
                 decay_factor = 0.9
+                if intervention_type == 'none':
+                    aligned_scores = harm_scores
                 weights = [(1.0 - score) * (decay_factor ** i) for i, score in enumerate(aligned_scores)]
                 weights_sum = sum(weights)
                 if weights_sum > 0:
@@ -431,6 +437,14 @@ def generate_visualization(puppet, output_dir):
     plt.legend()
     plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_exposure.png"), dpi=300, bbox_inches='tight')
     plt.close()
+    
+    # Force y-axis to show only integer ticks
+    plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.gca().yaxis.set_major_formatter(FormatStrFormatter('%d'))  # Ensure no decimals (e.g., 0, not 0.0)
+    
+    # Ensure x-axis also shows integers without decimals
+    plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%d'))
+    
 
     # Collect category data from experiment log
     experiment_log_path = os.path.join(output_dir, "..", "metadata", "experiment_log.json")
@@ -470,6 +484,14 @@ def generate_visualization(puppet, output_dir):
         plt.legend(title="Category")
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.tight_layout()
+        # Force y-axis to show only integer ticks
+        plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
+        plt.gca().yaxis.set_major_formatter(FormatStrFormatter('%d'))  # Ensure no decimals (e.g., 0, not 0.0)
+        
+        # Ensure x-axis also shows integers without decimals
+        plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%d'))
+    
+    
         plt.savefig(os.path.join(output_dir, f"{puppet['puppetId']}_category_distribution.png"), dpi=300, bbox_inches='tight')
         plt.close()
         

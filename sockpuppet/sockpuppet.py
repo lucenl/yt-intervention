@@ -151,7 +151,7 @@ def train(puppet, args):
         if watched >= trainingN:
             break
         for attempt in range(3):
-            logging.info(f"Attempt {attempt + 1} to watch video {videoId}")
+            # logging.info(f"Attempt {attempt + 1} to watch video {videoId}")
             try:
                 video = Video(None, make_url(videoId))
                 watch(puppet, video, args["duration"])

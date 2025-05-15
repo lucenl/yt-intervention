@@ -15,8 +15,8 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
 ARGS_DIR = os.path.join(os.getcwd(), 'arguments')
 
-NUM_TRAINING_VIDEOS = 5
-WATCH_DURATION = 5
+NUM_TRAINING_VIDEOS = 120
+WATCH_DURATION = 30
 USERNAME = os.getuid()
 
 PERCENTAGE_GROUPS = [50]
