@@ -1,10 +1,23 @@
-# build artifacts
+# log files
+*.log
+*.png
+*.csv
+*.json
+*.txt
+.*xlsx
+
+
+# any folder named logs or starting with logs_
+logs/
+logs_*/
+
+# output folders
+output/
+output_*/
+
+# build folders
 dist/
 out/
 
-# log files
-*.log
-
-logs/
-output/
-
+# models
+roberta/
