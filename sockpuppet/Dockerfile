@@ -22,7 +22,7 @@ WORKDIR /app
 
 # Install pre-dependencies
 RUN apt update
-RUN apt install -y wget g++ unzip xvfb firefox-esr git
+RUN apt install -y wget g++ unzip xvfb git
 
 # install google chrome
 RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \

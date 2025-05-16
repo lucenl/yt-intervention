@@ -134,6 +134,7 @@ def spawn_containers(args):
             os.chmod(puppet_shared_host, 0o777)
             
             if not args.simulate:
+                print(puppet_args["puppetId"])
                 logger.info(f"Spawning puppet {puppet_args['puppetId']} with steps {args.steps}, intervention_type {intervention_type}...")
                 command = ["python", "sockpuppet.py", json.dumps(puppet_args)]
                 try:

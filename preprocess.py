@@ -4,14 +4,36 @@ import logging
 import numpy as np
 import random
 from metadata_extractor import MetadataExtractor
-from roberta_classifier import RoBERTaClassifier, MulticlassClassifier
+# from roberta_classifier import RoBERTaClassifier, MulticlassClassifier
 import pandas as pd
+import multiprocessing as mp
+import requests
 
 SHARED_DIR = "./shared"
 LOCAL_LOG_DIR = "./local_logs"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
 os.makedirs(EXPERIMENT_DATA_DIR, exist_ok=True)
+
+# worker for binary classification
+def _binary_worker(args):
+    batch_metadata, model_path, batch_size = args
+    # df = pd.DataFrame(batch_metadata)
+    # cls = RoBERTaClassifier(model_path, batch_size=batch_size)
+    # out = cls.classify_batch(df)
+    req = requests.post('http://localhost:9000/classify_roberta', json={"metadata": batch_metadata})
+    out = pd.DataFrame(req.json())
+    return out["harm_score"].tolist()
+
+# worker for multiclass classification
+def _multi_worker(args):
+    batch_metadata, model_path, batch_size = args
+    # df = pd.DataFrame(batch_metadata)
+    # cls = MulticlassClassifier(model_path, batch_size=batch_size)
+    # out = cls.classify_batch(df)
+    req = requests.post('http://localhost:9000/classify_multiclass', json={"metadata": batch_metadata})
+    out = pd.DataFrame(req.json())
+    return out["category"].tolist()
 
 def load_or_initialize_harmless_pool(puppet_id):
     """Load existing harmless pool or initialize with 10 non-overlapping videos."""
@@ -57,23 +79,38 @@ def extract_metadata(video_ids, puppet_id):
     logging.info(f"Extracted metadata for {len(video_ids)} videos")
     return metadata
 
-def classify_videos(metadata):
+def classify_videos(metadata, batch_size=2):
     """Classify videos using RoBERTa to determine harm scores."""
-    binary_classifier = RoBERTaClassifier("./models/binary")
-    harm_scores = binary_classifier.classify_batch(pd.DataFrame(metadata))["harm_score"].tolist()
+    # split metadata into micro-batches
+    batches = [metadata[i : i + batch_size]
+               for i in range(0, len(metadata), batch_size)]
+    # for each, spawn a subprocess that loads its own classifier and then exits
+    with mp.Pool(processes=min(len(batches), 1)) as pool:
+        args = [(bat, "./models/binary", batch_size) for bat in batches]
+        results = pool.map(_binary_worker, args)
+    # flatten back into one list
+    harm_scores = [score for sub in results for score in sub]
     logging.info(f"Classified videos with harm scores: {harm_scores}")
     return harm_scores
 
-def categorize_harmful_videos(metadata, harm_scores, harm_threshold):
+def categorize_harmful_videos(metadata, harm_scores, harm_threshold, batch_size=2):
     """Categorize harmful videos using a multiclass classifier."""
-    harmful_indices = [i for i, score in enumerate(harm_scores) if score > harm_threshold]
+    harmful_indices = [i for i, s in enumerate(harm_scores) if s > harm_threshold]
     categories = [""] * len(harm_scores)
     if harmful_indices:
-        harmful_videos = [metadata[i] for i in harmful_indices]
-        multiclass_classifier = MulticlassClassifier("./models/multiclass")
-        multiclass_results = multiclass_classifier.classify_batch(pd.DataFrame(harmful_videos))
-        for idx, result in enumerate(multiclass_results["category"]):
-            categories[harmful_indices[idx]] = result
+        # pull out only the harmful entries
+        harmful_md = [metadata[i] for i in harmful_indices]
+        # micro-batch them
+        batches = [harmful_md[i : i + batch_size]
+                   for i in range(0, len(harmful_md), batch_size)]
+        with mp.Pool(processes=min(len(batches), 1)) as pool:
+            args = [(bat, "./models/multiclass", batch_size) for bat in batches]
+            results = pool.map(_multi_worker, args)
+        cats = [c for sub in results for c in sub]
+        # reinsert into the full list
+        for idx, cat in zip(harmful_indices, cats):
+            categories[idx] = cat
+
     logging.info(f"Assigned categories: {categories}")
     return categories, harmful_indices
 

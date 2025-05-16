@@ -93,7 +93,7 @@ class RoBERTaClassifier:
             Array of harm scores (probabilities)
         """
         dataset = RoBERTaTextDataset(texts, self.tokenizer, self.max_len)
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, pin_memory=(self.device!="cpu"), num_workers=2)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
 
         all_probs = []
         with torch.no_grad():  # Disable gradient computation for inference
@@ -190,3 +190,39 @@ class MulticlassClassifier:
             "video_id": metadata_df["video_id"],
             "category": categories
         })
+
+if __name__ == '__main__':
+
+    roberta_classifier = RoBERTaClassifier(model_path="./models/binary")
+    multiclass_classifier = MulticlassClassifier(model_path="./models/multiclass")
+
+    from flask import Flask, request
+    app = Flask(__name__)
+
+    @app.route('/classify_roberta', methods=['POST'])
+    def classify_roberta():
+        """
+        Endpoint to classify a batch of video metadata.
+        Expects JSON input with 'metadata' key containing a list of metadata dictionaries.
+        """
+        data = request.json
+        metadata_df = pd.DataFrame(data['metadata'])
+        
+        # Classify and return results
+        result_df = roberta_classifier.classify_batch(metadata_df)
+        return result_df.to_json(orient='records')
+
+    @app.route('/classify_multiclass', methods=['POST'])
+    def classify_multiclass():
+        """
+        Endpoint to classify a batch of video metadata into categories.
+        Expects JSON input with 'metadata' key containing a list of metadata dictionaries.
+        """
+        data = request.json
+        metadata_df = pd.DataFrame(data['metadata'])
+        
+        # Classify and return results
+        result_df = multiclass_classifier.classify_batch(metadata_df)
+        return result_df.to_json(orient='records')
+
+    app.run(host='localhost', port=9000)
