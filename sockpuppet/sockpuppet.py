@@ -5,9 +5,13 @@ import logging
 from datetime import datetime
 from ytdriver import YTDriver, Video, VideoUnavailableException
 import sys
+import requests
 
 # Constants
 SHARED_DIR = "/shared"
+OUTPUT_DIR = "/output"
+LOG_DIR = "/logs"
+MONITOR_URL = "http://host.docker.internal:5000"
 
 def init_puppet(puppetId, profile_dir):
     puppet = {
@@ -29,20 +33,20 @@ def add_action(puppet, action, params=None):
         "timestamp": datetime.now().isoformat()
     })
 
-def get_recommendations(puppet, focus):
+def get_recommendations(puppet, focus, round_num=None):
     if focus == "homepage":
         recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=6)[:25]
     else:
         recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
     video_ids = [vid.videoId for vid in recommendations]
-    add_action(puppet, f"get_{focus}_recommendations", video_ids)
+    add_action(puppet, f"get_{focus}_recommendations{'_' + str(round_num) if round_num else ''}", video_ids)
     return video_ids
 
 def watch(puppet, video: Video, duration):
     try:
         puppet["driver"].play(video, duration=duration)
     except VideoUnavailableException as e:
-        logging.info("Skipping unavailable video")
+        logging.info(f"Skipping unavailable video {video.videoId}")
         add_action(puppet, "watch", {"videoId": video.videoId, "error": str(e)})
     else:
         add_action(puppet, "watch", video.videoId)
@@ -75,43 +79,120 @@ def intervention(puppet, args):
     add_action(puppet, "intervention_start")
     rounds = int(args.get("rounds", 10))
     focus = args.get("focus", "homepage")
+    intervention_type = args.get("intervention_type", "downrank")
     puppet_shared_dir = os.path.join(SHARED_DIR, puppet["puppetId"])
     os.makedirs(puppet_shared_dir, exist_ok=True)
 
-    # Bootstrap: Fetch initial recommendations after training
+    # Bootstrap: Fetch initial recommendations
     video_ids = get_recommendations(puppet, focus)
     with open(os.path.join(puppet_shared_dir, "recommendations_0.txt"), "w") as f:
         f.write("\n".join(video_ids))
-    with open(os.path.join(puppet_shared_dir, "ready_0.txt"), "w") as f:
-        f.write("Ready")
-    done_file = os.path.join(puppet_shared_dir, "done_0.txt")
-    while not os.path.exists(done_file):
-        time.sleep(5)
 
+    # Start preprocessing for round 0
+    try:
+        response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
+            "puppet_id": puppet["puppetId"],
+            "round_num": 0,
+            "intervention_type": intervention_type,
+            "focus": focus
+        }, timeout=10)
+    except Exception as e:
+        logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+        return
+    if response.status_code != 200:
+        logging.error(f"Failed to start preprocess for round 0: {response.text}")
+        return
+    logging.info("Started preprocessing for round 0")
+
+    # Wait for preprocessing to complete
+    while True:
+        try:
+            response = requests.post(f"{MONITOR_URL}/get_recommendations", json={
+                "puppet_id": puppet["puppetId"],
+                "round_num": 0,
+                "intervention_type": intervention_type,
+            }, timeout=10)
+            logging.info(f"Polling /get_recommendations, status: {response.status_code}, text: {response.text}")
+        except Exception as e:
+            logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+            return
+        if response.status_code == 200:
+            data = response.json()
+            next_video = data.get("next_video")
+            if not next_video:
+                logging.error(f"No next video received for round 0")
+                break
+            break
+        elif response.status_code == 500:
+            logging.error(f"Preprocessing failed for round 0: {response.text}")
+            break
+        logging.info("Waiting for preprocessing to complete for round 0")
+        time.sleep(5)
 
     # Intervention rounds
     for round_num in range(1, rounds + 1):
         add_action(puppet, f"round_{round_num}_start")
-        video_file = os.path.join(puppet_shared_dir, f"next_video_{round_num}.txt")
+        
+        # Fecth and dump the recommendations for this round
+        recs = get_recommendations(puppet, focus, round_num)
+        with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "w") as f:
+            f.write("\n".join(recs))
+
+        # Start preprocessing for this round
         try:
-            with open(video_file, "r") as f:
-                video_id = f.read().strip()
+            response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
+                "puppet_id": puppet["puppetId"],
+                "round_num": round_num,
+                "intervention_type": intervention_type,
+                "focus": focus
+            }, timeout=10)
         except Exception as e:
-            logging.error(f"Failed to read {video_file}: {str(e)}")
-            raise RuntimeError(f"Failed to read next video file {video_file}: {str(e)}")
-        selected_video = Video(None, make_url(video_id))
+            logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+            return
+        if response.status_code != 200:
+            logging.error(f"Failed to start preprocess for round {round_num}: {response.text}")
+            break
+
+        # Wait for preprocessing to complete and get recommendations
+        while True:
+            try:
+                response = requests.post(f"{MONITOR_URL}/get_recommendations", json={
+                    "puppet_id": puppet["puppetId"],
+                    "round_num": round_num,
+                    "intervention_type": intervention_type,
+                }, timeout=10)
+            except Exception as e:
+                logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+                return
+            if response.status_code == 200:
+                data = response.json()
+                next_video = data.get("next_video")
+                if not next_video:
+                    logging.error(f"No next video received for round {round_num}")
+                    break
+                logging.info(f"Received next video {next_video} for round {round_num}")
+                break
+            elif response.status_code == 500:
+                logging.error(f"Preprocessing failed for round {round_num}: {response.text}")
+                return 
+            logging.info(f"Waiting for preprocessing to complete for round {round_num}")
+            time.sleep(5)
+
+        # Watch the video
+        selected_video = Video(None, make_url(next_video))
         watch(puppet, selected_video, args["duration"])
 
-        video_ids = get_recommendations(puppet, focus, round_num)
-        with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "w") as f:
-            f.write("\n".join(video_ids))
-        with open(os.path.join(puppet_shared_dir, f"ready_{round_num}.txt"), "w") as f:
-            f.write("Ready")
+        # Signal round completion
+        response = requests.post(f"{MONITOR_URL}/complete_round", json={
+            "puppet_id": puppet["puppetId"],
+            "round_num": round_num
+        }, timeout=10)
+        if response.status_code != 200:
+            logging.warning(f"Round {round_num} completion not acknowledged: {response.text}")
+        logging.info(f"Signaled completion for round {round_num}")
 
-        done_file = os.path.join(puppet_shared_dir, f"done_{round_num}.txt")
-        while not os.path.exists(done_file):
-            time.sleep(5)
         add_action(puppet, f"round_{round_num}_end")
+
     add_action(puppet, "intervention_end")
 
 if __name__ == "__main__":
@@ -128,7 +209,7 @@ if __name__ == "__main__":
     profile_dir = os.path.join(args["outputDir"], "profiles", args["puppetId"])
     os.makedirs(os.path.dirname(profile_dir), exist_ok=True)
     
-    # Load pre-trained puppet state for intervention-only
+    # Load pre-trained puppet state for intervention-only or initialize for combined/train
     puppet_state_file = os.path.join(args["outputDir"], "puppets", f"{args['puppetId']}.json")
     if args["steps"] == "intervention" and os.path.exists(puppet_state_file):
         with open(puppet_state_file, "r") as f:
@@ -139,6 +220,7 @@ if __name__ == "__main__":
         logging.info(f"Loaded pre-trained puppet state for {args['puppetId']}")
     else:
         puppet = init_puppet(args["puppetId"], profile_dir)
+
     steps = args["steps"]
 
     if steps == "train":

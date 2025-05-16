@@ -55,7 +55,7 @@ class RoBERTaClassifier:
     Binary classification using RoBERTa model with optimized inference.
     """
 
-    def __init__(self, model_path, threshold=0.8, logger=None, batch_size=64):
+    def __init__(self, model_path, threshold=0.8, logger=None, batch_size=32):
         """
         Initialize classifier.
 
@@ -73,7 +73,7 @@ class RoBERTaClassifier:
         # Load model and tokenizer
         self.logger.info(f"Loading RoBERTa model from {model_path}")
         self.model = RobertaForSequenceClassification.from_pretrained(model_path)
-        self.tokenizer = RobertaTokenizer.from_pretrained("roberta-large")
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_path)
         self.max_len = self.tokenizer.model_max_length
         
         # Set up device and model for inference
@@ -93,7 +93,7 @@ class RoBERTaClassifier:
             Array of harm scores (probabilities)
         """
         dataset = RoBERTaTextDataset(texts, self.tokenizer, self.max_len)
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, pin_memory=(self.device!="cpu"), num_workers=2)
 
         all_probs = []
         with torch.no_grad():  # Disable gradient computation for inference

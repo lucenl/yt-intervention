@@ -59,7 +59,7 @@ def extract_metadata(video_ids, puppet_id):
 
 def classify_videos(metadata):
     """Classify videos using RoBERTa to determine harm scores."""
-    binary_classifier = RoBERTaClassifier(model_path="./models/binary")
+    binary_classifier = RoBERTaClassifier("./models/binary")
     harm_scores = binary_classifier.classify_batch(pd.DataFrame(metadata))["harm_score"].tolist()
     logging.info(f"Classified videos with harm scores: {harm_scores}")
     return harm_scores
@@ -70,7 +70,7 @@ def categorize_harmful_videos(metadata, harm_scores, harm_threshold):
     categories = [""] * len(harm_scores)
     if harmful_indices:
         harmful_videos = [metadata[i] for i in harmful_indices]
-        multiclass_classifier = MulticlassClassifier(model_path="./models/multiclass")
+        multiclass_classifier = MulticlassClassifier("./models/multiclass")
         multiclass_results = multiclass_classifier.classify_batch(pd.DataFrame(harmful_videos))
         for idx, result in enumerate(multiclass_results["category"]):
             categories[harmful_indices[idx]] = result
@@ -145,7 +145,7 @@ def save_experiment_data(puppet_id, round_num, video_ids, harm_scores, categorie
 
 def save_next_video(puppet_shared_dir, round_num, selected_video_id):
     """Save the selected video ID for the next round."""
-    next_video_file = os.path.join(puppet_shared_dir, f"next_video_{round_num + 1}.txt")
+    next_video_file = os.path.join(puppet_shared_dir, f"next_video_{round_num}.txt")  # Changed from round_num + 1
     with open(next_video_file, "w") as f:
         f.write(selected_video_id)
     logging.info(f"Saved next video ID to {next_video_file}")

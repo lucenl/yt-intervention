@@ -6,6 +6,8 @@ import pandas as pd
 from uuid import uuid4
 import json
 import random
+import logging
+import stat
 
 IMAGE_NAME = "lucen/youtube-sock-puppet"
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
@@ -20,6 +22,15 @@ PUPPETS_PER_GROUP = 2
 
 ROUNDS = 10
 
+# Setup logging
+logging.basicConfig(
+    filename="docker-api.log",
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='a'
+)
+logger = logging.getLogger(__name__)
+
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--build", action="store_true", help="Build docker image")
@@ -30,14 +41,20 @@ def parse_args():
     parser.add_argument("--training-videos", default="data/training/", help="Path to the training videos folder")
     parser.add_argument("--steps", default="combined", choices=["train", "intervention", "combined"], help="Steps to perform")
     parser.add_argument("--puppets-per-group", type=int, default=PUPPETS_PER_GROUP, help="Number of puppets per group")
-    parser.add_argument("--harmful-percentages", type=float, nargs="+", default=PERCENTAGE_GROUPS, help="Percentage of harmful videos")
+    parser.add_argument("--harmful-percentages", type=int, nargs="+", default=PERCENTAGE_GROUPS, help="Percentage of harmful videos")
     parser.add_argument("--focus", type=str, default="homepage", choices=["homepage", "upnext"], help="Focus for recommendations")
+    parser.add_argument('--network', type=str, default='bridge', help='Docker network mode')
     return parser.parse_args()
 
 def build_image():
     client = docker.from_env()
-    client.images.build(path='./sockpuppet', tag=IMAGE_NAME, rm=True)
-   
+    print("Building Docker image...")
+    try:
+        client.images.build(path='./sockpuppet', tag=IMAGE_NAME, rm=True)
+        print("Docker image built successfully")
+    except Exception as e:
+        print(f"Failed to build Docker image: {str(e)}")
+        raise
 
 def get_mount_volumes():
     return {
@@ -57,10 +74,10 @@ def load_video_pools(args):
     try:
         harmful_pool = pd.read_csv(os.path.join(TRAINING_BASE, "harmful.csv"))
         non_harmful_pool = pd.read_csv(os.path.join(TRAINING_BASE, "non_harmful.csv"))
-        print(f"Loaded {len(harmful_pool)} harmful videos and {len(non_harmful_pool)} non-harmful videos.")
+        logger.info(f"Loaded {len(harmful_pool)} harmful videos and {len(non_harmful_pool)} non-harmful videos.")
         return harmful_pool, non_harmful_pool
     except Exception as e:
-        print(f"Error loading video pools: {e}")
+        logger.error(f"Error loading video pools: {e}")
         return None, None
 
 def get_training_videos(harmful_pool, harmless_pool, harmful_percentage):
@@ -79,12 +96,8 @@ def spawn_containers(args):
 
     harmful_pool, harmless_pool = load_video_pools(args)
     if harmful_pool is None or harmless_pool is None:
-        print("No video pools available. Exiting.")
+        logger.error("No video pools available. Exiting.")
         exit(1)
-
-    for d in [OUTPUT_DIR, LOGS_DIR, SHARED_DIR, os.path.join(OUTPUT_DIR, "profiles"), os.path.join(OUTPUT_DIR, "puppets")]:
-        os.makedirs(d, exist_ok=True)
-        os.chmod(d, 0o777)
 
     count = 0
     total_experiments = args.puppets_per_group * len(args.harmful_percentages)
@@ -92,11 +105,14 @@ def spawn_containers(args):
     for puppet_idx in range(args.puppets_per_group):
         for percentage in args.harmful_percentages:
             while max_containers_reached(client, args.max_containers):
-                print("Max containers reached. Sleeping...")
+                logger.info("Max containers reached. Sleeping...")
                 sleep(args.sleep_duration)
 
             training = get_training_videos(harmful_pool, harmless_pool, percentage)
-            puppet_id = f"harmful_{percentage}_{str(uuid4())[:8]}"
+            puppet_id = f"harmful_{percentage},{str(uuid4())[:8]}"
+            # Assign intervention type: alternate between "replace" and "downrank"
+            intervention_types = ["replace", "downrank", "none"]
+            intervention_type = intervention_types[puppet_idx % len(intervention_types)]
             puppet_args = {
                 "puppetId": puppet_id,
                 "duration": WATCH_DURATION,
@@ -107,20 +123,37 @@ def spawn_containers(args):
                 "trainingN": NUM_TRAINING_VIDEOS,
                 "steps": args.steps,
                 "rounds": ROUNDS,
-                "focus": args.focus
+                "focus": args.focus,
+                "intervention_type": intervention_type  # Add this
             }
-
+            
+            # 1. Ensure the host's shared/<puppet_id> exists and is writable by us:
+            host_shared = os.path.join(os.getcwd(), "shared")  # same as your SHARED_DIR mount
+            puppet_shared_host = os.path.join(host_shared, puppet_id)
+            os.makedirs(puppet_shared_host, exist_ok=True)
+            os.chmod(puppet_shared_host, 0o777)
+            
             if not args.simulate:
-                print(f"Spawning puppet {puppet_args['puppetId']} with steps {args.steps}...")
+                logger.info(f"Spawning puppet {puppet_args['puppetId']} with steps {args.steps}, intervention_type {intervention_type}...")
                 command = ["python", "sockpuppet.py", json.dumps(puppet_args)]
-                client.containers.run(
-                    IMAGE_NAME, command, volumes=get_mount_volumes(), shm_size="512M", remove=True, detach=True
-                )
+                try:
+                    container = client.containers.run(
+                        IMAGE_NAME,
+                        command,
+                        volumes=get_mount_volumes(),
+                        shm_size="1G",
+                        remove=True,
+                        detach=True,
+                        network=args.network,
+                        extra_hosts={"host.docker.internal": "host-gateway"}
+                    )
+                    logger.info(f"Started container {container.id} for puppet {puppet_id}")
+                except Exception as e:
+                    logger.error(f"Failed to start container for puppet {puppet_id}: {str(e)}")
 
             count += 1
             sleep(3)
-    print(f"Total containers spawned: {count}")
-
+    logger.info(f"Total containers spawned: {count}")
 def main():
     args = parse_args()
 
@@ -131,7 +164,7 @@ def main():
         spawn_containers(args)
 
     if not args.build and not args.run:
-        print("No operation specified. Use --build or --run.")
+        logger.info("No operation specified. Use --build or --run.")
 
 if __name__ == "__main__":
     main()
