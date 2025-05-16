@@ -29,17 +29,11 @@ class MetadataExtractor:
             max_workers: Maximum concurrent workers
         """
         self.output_dir = output_dir
-        self.metadata_dir = os.path.join(output_dir, "metadata")
         self.timeout = timeout
         self.max_workers = max_workers
-        
-        # Create directories
-        os.makedirs(self.metadata_dir, exist_ok=True)
-        
-        # Set up logger
         self.logger = logging.getLogger(__name__)
 
-    def extract_metadata_batch(self, video_ids):
+    def extract_metadata_batch(self, video_ids, puppet_id):
         """
         Extract metadata and transcripts for multiple videos and return as a list of dictionaries.
 
@@ -49,10 +43,12 @@ class MetadataExtractor:
         Returns:
             List of dictionaries containing metadata for each video
         """
+        metadata_dir = os.path.join(self.output_dir, "metadata", puppet_id)
+        os.makedirs(metadata_dir, exist_ok=True)
         self.logger.info(f"Extracting metadata and transcripts for {len(video_ids)} videos")
         
         # Filter out already processed videos
-        to_process = [vid for vid in video_ids if not os.path.exists(f'{self.metadata_dir}/{vid}.json')]
+        to_process = [vid for vid in video_ids if not os.path.exists(os.path.join(metadata_dir, f"{vid}.json"))]
         to_process = list(set(to_process))  # Remove duplicates
         
         self.logger.info(f"{len(to_process)}/{len(video_ids)} videos need processing")
@@ -60,28 +56,29 @@ class MetadataExtractor:
         if to_process:
             # Process videos concurrently
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = [executor.submit(self._process_video, vid) for vid in to_process]
+                futures = [executor.submit(self._process_video, vid, metadata_dir) for vid in to_process]
                 
                 for future in tqdm(futures, desc="Processing videos"):
                     future.result()
                     
         # Collect metadata into a list
         self.logger.info("Collecting metadata into list")
-        metadata_list = self._collect_metadata(video_ids)
+        metadata_list = self._collect_metadata(video_ids, metadata_dir)
         
         return metadata_list
 
-    def _process_video(self, video_id):
+    def _process_video(self, video_id, metadata_dir):
         """
         Download metadata for a single video.
 
         Args:
             video_id: YouTube video ID
+            metadata_dir: Directory to save metadata files
 
         Returns:
             Video ID if successful, None otherwise
         """
-        output_path = f'{self.metadata_dir}/{video_id}.json'
+        output_path = os.path.join(metadata_dir, f"{video_id}.json")
         
         try:
             # Construct yt-dlp command to get metadata
@@ -93,7 +90,7 @@ class MetadataExtractor:
             # Check if file exists and has content
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 # Extract transcript using the new method
-                self._extract_transcript(video_id, output_path)
+                self._extract_transcript(video_id, output_path, metadata_dir)
                 return video_id
             else:
                 self.logger.warning(f"Empty output for {video_id}")
@@ -106,13 +103,14 @@ class MetadataExtractor:
             self.logger.error(f"Error processing {video_id}: {e}")
             return None
 
-    def _extract_transcript(self, video_id, json_path):
+    def _extract_transcript(self, video_id, json_path, metadata_dir):
         """
         Extract transcript using optimized yt-dlp command and add it to the metadata file.
 
         Args:
             video_id: YouTube video ID
             json_path: Path to the JSON metadata file
+            metadata_dir: Directory where metadata is stored
         """
         try:
             # Read metadata file
@@ -124,7 +122,7 @@ class MetadataExtractor:
                 return
                 
             # Extract transcript using the optimized method
-            transcript_dir = os.path.join(self.metadata_dir, "transcripts")
+            transcript_dir = os.path.join(metadata_dir, "transcripts")
             os.makedirs(transcript_dir, exist_ok=True)
             
             output_path = os.path.join(transcript_dir, f"{video_id}.txt")
@@ -174,7 +172,7 @@ class MetadataExtractor:
             with open(json_path, 'w') as f:
                 json.dump(metadata, f)
 
-    def _collect_metadata(self, video_ids):
+    def _collect_metadata(self, video_ids, metadata_dir):
         """
         Collect metadata for specified video IDs into a list of dictionaries.
 
@@ -187,7 +185,7 @@ class MetadataExtractor:
         metadata_list = []
         
         for video_id in video_ids:
-            json_path = f'{self.metadata_dir}/{video_id}.json'
+            json_path = os.path.join(metadata_dir, f"{video_id}.json")
             
             if not os.path.exists(json_path):
                 # Add minimal record if file doesn't exist

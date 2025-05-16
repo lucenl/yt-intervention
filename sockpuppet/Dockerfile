@@ -1,5 +1,5 @@
 # For more information, please refer to https://aka.ms/vscode-docker-python
-FROM python:3.10-slim-buster
+FROM python:3.10-slim-bookworm
 
 # Keeps Python from generating .pyc files in the container
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -34,11 +34,5 @@ RUN pip install --upgrade git+https://github.com/Haroon96/YouTube-Driver.git
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-# New installations
-RUN pip install yt-dlp
-
 # copy code files
 COPY sockpuppet.py ./
-COPY intervention.py ./
-COPY metadata_extractor.py ./
-COPY roberta_classifier.py ./
