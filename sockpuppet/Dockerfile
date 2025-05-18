@@ -30,7 +30,7 @@ RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd6
     rm google-chrome-stable_current_amd64.deb
 
 # install python dependencies
-RUN pip install --upgrade git+https://github.com/Haroon96/YouTube-Driver.git
+RUN pip install --upgrade git+https://github.com/lucenl/YouTube-Driver.git
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 

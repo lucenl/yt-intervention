@@ -34,19 +34,61 @@ def add_action(puppet, action, params=None):
     })
 
 def get_recommendations(puppet, focus, round_num=None):
-    if focus == "homepage":
-        recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=6)[:25]
-    else:
-        recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
-    video_ids = [vid.videoId for vid in recommendations]
-    add_action(puppet, f"get_{focus}_recommendations{'_' + str(round_num) if round_num else ''}", video_ids)
-    return video_ids
+    max_retries = 3
+    retry_delay = 5
+    for attempt in range(max_retries):
+        try:
+            if focus == "homepage":
+                recommendations = puppet["driver"].get_homepage_recommendations(scroll_times=6)[:25]
+            else:
+                recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
+            video_ids = [vid.videoId for vid in recommendations]
+            if not video_ids:
+                logging.warning(f"Attempt {attempt + 1}/{max_retries}: No recommendations for {focus}")
+                screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots", puppet["puppetId"])
+                os.makedirs(screenshot_dir, exist_ok=True)
+                logging.info(f"Saving screenshot for unavailable video {video_ids}")
+                screenshot_name = f"{error}_{round_num}_recs_{attempt + 1}.png"
+                screenshot_path = os.path.join(screenshot_dir, screenshot_name)
+                logging.info(f"Saving screenshot to {screenshot_path}")
+                screenshot = puppet["driver"].save_screenshot(screenshot_path)
+                logging.info(f"Screenshot saved to {screenshot_path}")
+                if screenshot:
+                    logging.error(f"Saved screenshot to {screenshot_path}")
+                else:
+                    logging.error(f"Failed to save screenshot for unavailable video {video.videoId}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                raise ValueError(f"No recommendations returned for {focus} after {max_retries} attempts")
+            add_action(puppet, f"get_{focus}_recommendations{'_' + str(round_num) if round_num else ''}", video_ids)
+            return video_ids
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1}/{max_retries}: Error fetching recommendations: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            raise
 
 def watch(puppet, video: Video, duration):
     try:
         puppet["driver"].play(video, duration=duration)
-    except VideoUnavailableException as e:
-        logging.info(f"Skipping unavailable video {video.videoId}")
+    except Exception as e:
+        logging.error(f"Video {video.videoId} is unavailable: {e}")
+        screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots", puppet["puppetId"])
+        logging.info(f"Saving screenshot for unavailable video {video.videoId}")
+        os.makedirs(screenshot_dir, exist_ok=True)
+        logging.info(f"Saving screenshot to {screenshot_dir}")
+        screenshot_name = f"error_{video.videoId}.png"
+        screenshot_path = os.path.join(screenshot_dir, screenshot_name)
+        logging.info(f"Saving screenshot to {screenshot_path}")
+        puppet["driver"].save_screenshot(screenshot_path)
+        logging.info(f"Screenshot saved to {screenshot_path}")
+        if screenshot:
+            logging.info(f"Saved screenshot to {screenshot_path}")
+        else:
+            logging.error(f"Failed to save screenshot for unavailable video {video.videoId}")
+        logging.info(f"Skipping unavailable video {video.videoId}l")
         add_action(puppet, "watch", {"videoId": video.videoId, "error": str(e)})
     else:
         add_action(puppet, "watch", video.videoId)
@@ -95,7 +137,7 @@ def intervention(puppet, args):
             "round_num": 0,
             "intervention_type": intervention_type,
             "focus": focus
-        }, timeout=10)
+        }, timeout=30)
     except Exception as e:
         logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
         return
@@ -111,8 +153,8 @@ def intervention(puppet, args):
                 "puppet_id": puppet["puppetId"],
                 "round_num": 0,
                 "intervention_type": intervention_type,
-            }, timeout=10)
-            logging.info(f"Polling /get_recommendations, status: {response.status_code}, text: {response.text}")
+            }, timeout=30)
+            # logging.info(f"Polling /get_recommendations, status: {response.status_code}, text: {response.text}")
         except Exception as e:
             logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
             return
@@ -145,7 +187,7 @@ def intervention(puppet, args):
                 "round_num": round_num,
                 "intervention_type": intervention_type,
                 "focus": focus
-            }, timeout=10)
+            }, timeout=30)
         except Exception as e:
             logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
             return
@@ -160,7 +202,7 @@ def intervention(puppet, args):
                     "puppet_id": puppet["puppetId"],
                     "round_num": round_num,
                     "intervention_type": intervention_type,
-                }, timeout=10)
+                }, timeout=30)
             except Exception as e:
                 logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
                 return
@@ -186,7 +228,7 @@ def intervention(puppet, args):
         response = requests.post(f"{MONITOR_URL}/complete_round", json={
             "puppet_id": puppet["puppetId"],
             "round_num": round_num
-        }, timeout=10)
+        }, timeout=30)
         if response.status_code != 200:
             logging.warning(f"Round {round_num} completion not acknowledged: {response.text}")
         logging.info(f"Signaled completion for round {round_num}")
