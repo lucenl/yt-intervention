@@ -84,10 +84,6 @@ def watch(puppet, video: Video, duration):
         logging.info(f"Saving screenshot to {screenshot_path}")
         puppet["driver"].save_screenshot(screenshot_path)
         logging.info(f"Screenshot saved to {screenshot_path}")
-        if screenshot:
-            logging.info(f"Saved screenshot to {screenshot_path}")
-        else:
-            logging.error(f"Failed to save screenshot for unavailable video {video.videoId}")
         logging.info(f"Skipping unavailable video {video.videoId}l")
         add_action(puppet, "watch", {"videoId": video.videoId, "error": str(e)})
     else:
