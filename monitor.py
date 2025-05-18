@@ -49,8 +49,8 @@ def start_preprocess():
     focus = data.get('focus', 'homepage')
     training = data.get('training')
     
-    if len(active_processes) >= max_processes:
-        return jsonify({"status": "error", "message": "Max processes reached"}), 429
+    # if len(active_processes) >= max_processes:
+    #     return jsonify({"status": "error", "message": "Max processes reached"}), 429
 
     logger.info(f"Received start_preprocess request for {puppet_id}, round {round_num}")
     process = Process(target=run_preprocess, args=(puppet_id, round_num, intervention_type, focus, training))

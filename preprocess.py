@@ -164,17 +164,20 @@ def select_video_decay_weighted(modified_video_ids, aligned_scores):
     logging.info(f"Selected video (decay-weighted): {selected_video_id} at index {selected_index} with weights {normalized_weights}")
     return selected_video_id, selected_index
 
-def save_experiment_data(puppet_id, round_num, video_ids, harm_scores, categories, modified_video_ids, selected_video_id):
+def save_experiment_data(puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id):
     """Save experiment data to a JSON file."""
     experiment_file = os.path.join(EXPERIMENT_DATA_DIR, puppet_id, f"round_{round_num}.json")
     os.makedirs(os.path.dirname(experiment_file), exist_ok=True)
+    num_harmful = sum(1 for score in harm_scores if score > harm_threshold)
     experiment_data = {
         "round": round_num,
         "recommendations": video_ids,
         "harm_scores": harm_scores,
         "categories": categories,
         "modified_recommendations": modified_video_ids,
-        "selected_video": selected_video_id
+        "selected_video": selected_video_id,
+        "num_harmful_videos": num_harmful,
+        "harm_category_counts": {cat: categories.count(cat) for cat in ['HH', 'SXL', 'PH']},
     }
     with open(experiment_file, "w") as f:
         json.dump(experiment_data, f, indent=4)
@@ -213,6 +216,7 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
 
     # Extract and classify data
     metadata = extract_metadata(video_ids, puppet_id)
+    logger.info(f"number of videos with title: {len([m for m in metadata if m['title']])}")
     harm_scores = classify_videos(metadata)
     categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold)
 
@@ -232,7 +236,7 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
     selected_video_id, _ = select_video_decay_weighted(modified_video_ids, aligned_scores)
 
     # Save results
-    save_experiment_data(puppet_id, round_num, video_ids, harm_scores, categories, modified_video_ids, selected_video_id)
+    save_experiment_data(puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id)
     save_next_video(puppet_shared_dir, round_num, selected_video_id)
     signal_completion(puppet_shared_dir, round_num)
 
