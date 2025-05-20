@@ -53,14 +53,17 @@ def load_or_initialize_harmless_pool(puppet_id):
                 puppet_state = json.load(f)
                 training_videos = set(puppet_state["args"].get("training", []))
 
-        harmless_file = os.path.join("data", "non_harmful.csv")
+        harmless_file = os.path.join("data/training", "non_harmful.csv")
         if os.path.exists(harmless_file):
+            logging.info(f"Loading harmless videos from {harmless_file}")
             with open(harmless_file, "r") as f:
                 all_harmless = [line.strip() for line in f if line.strip()]
             available_harmless = [vid for vid in all_harmless if vid not in training_videos]
             harmless_pool = random.sample(available_harmless, min(10, len(available_harmless)))
+            logging.info(f"Initialized harmless pool with {len(harmless_pool)} videos from {len(available_harmless)} available")
         with open(pool_file, "w") as f:
             json.dump(harmless_pool, f)
+            logging.info(f"Saved harmless pool to {pool_file}")
     
     logging.info(f"Loaded/Initialized harmless pool for {puppet_id} with {len(harmless_pool)} videos")
     return harmless_pool
@@ -124,27 +127,28 @@ def apply_downrank_intervention(video_ids, harm_scores):
 def apply_replace_intervention(video_ids, harm_scores, harmful_indices, harmless_pool, harm_threshold):
     """Apply replace intervention by substituting harmful videos with harmless ones."""
     modified_video_ids = video_ids.copy()
+    # make a local copy so removals don’t affect the original pool
+    temp_pool = harmless_pool.copy()
     used_videos = set()
 
-    # Refill pool with newly discovered non-harmful videos if needed
-    non_harmful_indices = [i for i, score in enumerate(harm_scores) if score <= harm_threshold and video_ids[i] not in harmless_pool]
-    if non_harmful_indices and len(harmless_pool) < len(harmful_indices):
-        for idx in non_harmful_indices:
-            harmless_pool.append(video_ids[idx])
-        logging.info(f"Refilled harmless pool with {len(non_harmful_indices)} new non-harmful videos. New pool size: {len(harmless_pool)}")
-
     for i in harmful_indices:
-        if not harmless_pool:
+        if not temp_pool:
             logging.warning(f"No harmless videos left in pool for replacement at index {i}, skipping")
             break
-        replacement = random.choice(harmless_pool)
+        replacement = random.choice(temp_pool)
+        temp_pool.remove(replacement)
         modified_video_ids[i] = replacement
-        harmless_pool.remove(replacement)
         used_videos.add(replacement)
         logging.info(f"Replaced harmful video {video_ids[i]} at index {i} with {replacement}, removed from pool")
+    
+    # Refill pool with newly discovered non-harmful videos if needed
+    non_harmful_indices = [i for i, score in enumerate(harm_scores) if score <= harm_threshold and video_ids[i] not in harmless_pool]
+    for idx in non_harmful_indices:
+        harmless_pool.append(video_ids[idx])
+    logging.info(f"Refilled harmless pool with {len(non_harmful_indices)} new non-harmful videos. New pool size: {len(harmless_pool)}")
 
     aligned_scores = [0] * len(video_ids)  # Focus on position for decay-weighted random
-    logging.info(f"Replaced harmful videos: {modified_video_ids}")
+    logging.info(f"Videos after replacement: {modified_video_ids}")
     logging.info(f"Updated harmless pool size: {len(harmless_pool)}")
     return modified_video_ids, aligned_scores, harmless_pool
 
@@ -202,7 +206,6 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
     puppet_shared_dir = os.path.join(SHARED_DIR, puppet_id)
     with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "r") as f:
         video_ids = f.read().splitlines()
-
     # Setup logging
     log_file = os.path.join(LOCAL_LOG_DIR, f"{puppet_id}_preprocess.log")
     logging.basicConfig(
@@ -216,7 +219,6 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
 
     # Extract and classify data
     metadata = extract_metadata(video_ids, puppet_id)
-    logger.info(f"number of videos with title: {len([m for m in metadata if m['title']])}")
     harm_scores = classify_videos(metadata)
     categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold)
 
