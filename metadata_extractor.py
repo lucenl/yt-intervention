@@ -1,238 +1,156 @@
-"""
-YouTube Video Metadata Extraction Module
-
-Extract metadata and transcripts from YouTube videos for classification,
-storing results in JSON format for integration with experiment logging.
-"""
-
+# metadata_service.py
 import os
 import json
-import subprocess
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from tqdm.auto import tqdm
-import pandas as pd
-import re
 import requests
+import redis
+from flask import Flask, request, jsonify
 
-API_KEY = 'AIzaSyAW88VfM3okyJyv3y5AqsFAWWaG7VoU7RA'
+KEYS_ENV = 'AIzaSyBGdcHykAwbhEND9MtC-3ZAYhiXXyfV1As, AIzaSyCBkf4tEdjaUzczm6cWcolDoZhzD6IQXQg, AIzaSyAW88VfM3okyJyv3y5AqsFAWWaG7VoU7RA'
 
 
 class MetadataExtractor:
     """
-    Extract metadata and transcripts from YouTube videos using yt-dlp.
+    Redis-backed YouTube metadata cache exposing Flask routes directly on the app.
+    Supports rotating through a pool of YouTube API keys.
     """
 
-    def __init__(self, output_dir, timeout=60, max_workers=8):
-        """
-        Initialize the extractor.
+    def __init__(self, redis_url='redis://localhost:6379/0', api_keys=None):
+        # Read API keys from env or parameter (comma-separated)
+        keys_env = KEYS_ENV
+        self.api_keys = [k.strip() for k in keys_env.split(',') if k.strip()]
+        if not self.api_keys:
+            raise ValueError('Provide at least one YouTube API key via YOUTUBE_API_KEYS')
+        self._key_index = 0
 
-        Args:
-            output_dir: Directory to save metadata
-            timeout: Maximum time (seconds) for video processing
-            max_workers: Maximum concurrent workers
-        """
-        self.output_dir = output_dir
-        self.timeout = timeout
-        self.max_workers = max_workers
-        self.logger = logging.getLogger(__name__)
+        # Redis connection
+        self.REDIS_URL = redis_url
+        self.cache = redis.Redis.from_url(self.REDIS_URL, decode_responses=True)
 
-    def extract_metadata_batch(self, video_ids, puppet_id):
-        """
-        Extract metadata and transcripts for multiple videos and return as a list of dictionaries.
+    def _get_next_key(self):
+        key = self.api_keys[self._key_index]
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        return key
 
-        Args:
-            video_ids: List of YouTube video IDs
+    def _fetch_metadata(self, video_ids):
+        """Fetch metadata and transcripts from YouTube Data API in bulk."""
+        key = self._get_next_key()
+        params = {
+            'part': 'snippet',
+            'id': ','.join(video_ids),
+            'key': key
+        }
+        resp = requests.get('https://www.googleapis.com/youtube/v3/videos', params=params)
+        resp.raise_for_status()
+        items = resp.json().get('items', [])
 
-        Returns:
-            List of dictionaries containing metadata for each video
-        """
-        metadata_dir = os.path.join(self.output_dir, "metadata", puppet_id)
-        os.makedirs(metadata_dir, exist_ok=True)
-        self.logger.info(f"Extracting metadata and transcripts for {len(video_ids)} videos")
-
-        successful_videos = []
-
-        # Process videos concurrently
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self._process_video, vid, metadata_dir) for vid in video_ids]
-
-            for future in tqdm(futures, desc="Processing videos"):
-                vid = future.result()
-                if vid:
-                    successful_videos.append(vid)
-
-        # Collect metadata into a list
-        self.logger.info("Collecting metadata into list")
-        metadata_list = self._collect_metadata(successful_videos, metadata_dir)
-
-        return metadata_list
-
-    def _process_video(self, video_id, metadata_dir):
-        """
-        Download metadata for a single video.
-
-        Args:
-            video_id: YouTube video ID
-            metadata_dir: Directory to save metadata files
-
-        Returns:
-            Video ID if successful, None otherwise
-        """
-        output_path = os.path.join(metadata_dir, f"{video_id}.json")
-
-        try:
-            # Construct yt-dlp command to get metadata
-            cmd = f'yt-dlp -J --write-auto-sub --sub-lang en --skip-download "https://youtube.com/watch?v={video_id}" > {output_path} 2>/dev/null'
-
-            # Execute command with timeout
-            result = subprocess.run(cmd, shell=True, timeout=self.timeout)
-            if os.path.exists(output_path) and result.returncode == 0:
-                # Extract transcript using the new method
-                self._extract_transcript(video_id, output_path, metadata_dir)
-                return video_id
-            raise RuntimeError(f"Empty yt-dlp output for {video_id}")
-
-        except (subprocess.TimeoutExpired, RuntimeError) as e:
-            self.logger.info(f"{e!s}; falling back to API")
-        except Exception as e:
-            self.logger.error(f"Error processing {video_id}: {e}; falling back to API")
-
-        # Fallback to YouTube Data API if yt-dlp fails
-        self._fallback_api_fetch(video_id, output_path)
-
-        return video_id
-
-    def _fallback_api_fetch(self, video_id, json_path):
-        """
-        Fallback to YouTube Data API for snippet + transcript.
-        Writes a minimal metadata JSON at json_path.
-        """
-        try:
-            url = (
-                f'https://www.googleapis.com/youtube/v3/videos'
-                f'?part=snippet&id={video_id}&key={API_KEY}'
-            )
-            api_resp = requests.get(url).json()
-            item = api_resp.get('items', [])[0]
-
-            video_dict = {
-                'video_id': item['id'],
-                'title': item['snippet']['title'],
-                'description': item['snippet']['description'],
-                'transcript': '',
-                'date': item['snippet'].get('publishedAt', '')
+        results = []
+        for item in items:
+            vid = item.get('id')
+            print("vid: ", vid)
+            snippet = item.get('snippet', {})
+            data = {
+                'video_id': vid,
+                'title': snippet.get('title', ''),
+                'description': snippet.get('description', '')
             }
-            with open(json_path, 'w') as f:
-                json.dump(video_dict, f)
+            results.append(data)
+        return results
 
-        except requests.exceptions.HTTPError as e:
-            self.logger.error(f"Failed to fetch metadata for batch: {e}")
+    def register(self, app: Flask):
+        """Attach /metadata endpoints directly to the given Flask app."""
 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"API request failed: {e}")
+        @app.route('/metadata', methods=['GET'])
+        def get_metadata():
+            ids = request.args.get('ids', '')
+            video_ids = [v for v in ids.split(',') if v]
+            if not video_ids:
+                return jsonify({'error': 'No video IDs provided'}), 400
 
-    def _extract_transcript(self, video_id, json_path, metadata_dir):
-        """
-        Extract transcript using optimized yt-dlp command and add it to the metadata file.
+            # Redis hash 'metadata' stores video_id->JSON
+            cached = self.cache.hgetall('metadata')
+            missing = [vid for vid in video_ids if vid not in cached]
+            print("Missing:", missing)
 
-        Args:
-            video_id: YouTube video ID
-            json_path: Path to the JSON metadata file
-            metadata_dir: Directory where metadata is stored
-        """
-        try:
-            # Read metadata file
-            with open(json_path, 'r') as f:
-                metadata = json.load(f)
+            if missing:
+                print(f"Fetching metadata for missing IDs: {missing}")
+                try:
+                    new_items = self._fetch_metadata(missing)
+                    for item in new_items:
+                        self.cache.hset('metadata', item['video_id'], json.dumps(item))
+                    # Update local copy
+                    for item in new_items:
+                        cached[item['video_id']] = json.dumps(item)
+                except Exception as e:
+                    logging.error(f'Error fetching metadata for {missing}: {e}')
 
-            # Check if transcript already exists
-            if 'transcript' in metadata and metadata['transcript']:
-                return
+            # Return results in requested order
+            out = []
+            for vid in video_ids:
+                raw = cached.get(vid)
+                if raw:
+                    try:
+                        out.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        continue
 
-            # Extract transcript using the optimized method
-            transcript_dir = os.path.join(metadata_dir, "transcripts")
-            os.makedirs(transcript_dir, exist_ok=True)
+            # now rekey by video_id
+            result_dict = {}
+            for item in out:
+                result_dict[item['video_id']] = item
+            return jsonify(result_dict)
 
-            output_path = os.path.join(transcript_dir, f"{video_id}.txt")
+        @app.route('/metadata', methods=['POST'])
+        def post_metadata():
+            items = request.get_json(force=True)
+            if not isinstance(items, list):
+                return jsonify({'error': 'Expected a list of metadata dicts'}), 400
+            added = 0
+            for item in items:
+                vid = item.get('video_id')
+                if vid:
+                    self.cache.hset('metadata', vid, json.dumps(item))
+                    added += 1
+            return jsonify({'status': 'ok', 'added': added})
 
-            # Check if transcript file already exists
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    transcript = f.read().strip()
-                    transcript = re.sub(r'\s+', ' ', transcript)
-            else:
-                # Streamlined command to get transcript and create a single continuous line
-                temp_srt = os.path.join(transcript_dir, f"temp_{video_id}.en.srt")
-                cmd = (
-                    f"yt-dlp --skip-download --write-subs --write-auto-subs --sub-lang en "
-                    f"--sub-format ttml --convert-subs srt --output '{transcript_dir}/temp_{video_id}.%(ext)s' "
-                    f"https://youtube.com/watch?v={video_id} > /dev/null 2>&1 && "
-                    f"cat '{temp_srt}' 2>/dev/null | "
-                    f"grep -v '^[0-9]\\+$' | grep -v '^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' | "
-                    f"sed 's/<[^>]*>//g' | grep -v '^$' | tr '\\n' ' ' | sed 's/\\s\\+/ /g' > '{output_path}' && "
-                    f"rm -f '{temp_srt}'"
-                )
+    @staticmethod
+    def extract_client(video_ids, service_url='http://localhost:6000'):
+        """Client helper to call GET /metadata."""
+        if not video_ids:
+            return []
+        ids_str = ','.join(video_ids)
+        resp = requests.get(f"{service_url}/metadata", params={'ids': ids_str})
+        resp.raise_for_status()
+        return resp.json()
 
-                # Execute command with timeout
-                subprocess.run(cmd, shell=True, timeout=self.timeout)
+def make_redis_client():
+    """
+    Parse REDIS_URL and return a redis.Redis instance,
+    including authentication if provided.
+    """
+    parsed = urlparse('redis://localhost:6379/0')
+    kwargs = {
+        'host': parsed.hostname,
+        'port': parsed.port or 6379,
+        'decode_responses': True
+    }
+    if parsed.password:
+        kwargs['password'] = parsed.password
+    return redis.Redis(**kwargs)
 
-                # Check if transcript file was created and has content
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    with open(output_path, 'r', encoding='utf-8') as f:
-                        transcript = f.read().strip()
-                        transcript = re.sub(r'\s+', ' ', transcript)
-                else:
-                    transcript = ""
+# Example usage in monitor.py:
+# from metadata_service import MetadataService
+# from flask import Flask
+# app = Flask(__name__)
+# svc = MetadataService()
+# svc.register(app)
 
-            # Add transcript to metadata and save
-            metadata['transcript'] = transcript
-
-            with open(json_path, 'w') as f:
-                json.dump(metadata, f)
-
-        except Exception as e:
-            self.logger.error(f"Error extracting transcript for {video_id}: {e}")
-            # Ensure metadata file isn't corrupted
-            with open(json_path, 'r') as f:
-                metadata = json.load(f)
-            metadata['transcript'] = ""
-            with open(json_path, 'w') as f:
-                json.dump(metadata, f)
-
-    def _collect_metadata(self, video_ids, metadata_dir):
-        """
-        Collect metadata for specified video IDs into a list of dictionaries.
-
-        Args:
-            video_ids: List of YouTube video IDs
-
-        Returns:
-            List of metadata dictionaries
-        """
-        metadata_list = []
-
-        for video_id in video_ids:
-            json_path = os.path.join(metadata_dir, f"{video_id}.json")
-
-            try:
-                with open(json_path, 'r') as f:
-                    metadata = json.load(f)
-
-                record = {
-                    'links': f"https://youtube.com/watch?v={video_id}",
-                    'video_id': video_id,
-                    'channel': metadata.get('uploader', ''),
-                    'title': metadata.get('title', ''),
-                    'description': metadata.get('description', ''),
-                    'transcript': metadata.get('transcript', ''),
-                    'date': metadata.get('upload_date', '')
-                }
-
-                metadata_list.append(record)
-
-            except Exception as e:
-                self.logger.error(f"Error reading metadata for {video_id}: {e}")
-
-        self.logger.info(f"Collected metadata for {len(metadata_list)} videos")
-        return metadata_list
+# If run standalone:
+if __name__ == '__main__':
+    from urllib.parse import urlparse
+    r = make_redis_client()
+    from flask import Flask
+    app = Flask(__name__)
+    svc = MetadataExtractor()
+    svc.register(app)
+    app.run(host='localhost', port=6000)

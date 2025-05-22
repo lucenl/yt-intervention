@@ -75,15 +75,6 @@ def watch(puppet, video: Video, duration):
         puppet["driver"].play(video, duration=duration)
     except Exception as e:
         logging.error(f"Video {video.videoId} is unavailable: {e}")
-        # screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots", puppet["puppetId"])
-        # logging.info(f"Saving screenshot for unavailable video {video.videoId}")
-        # os.makedirs(screenshot_dir, exist_ok=True)
-        # logging.info(f"Saving screenshot to {screenshot_dir}")
-        # screenshot_name = f"error_{video.videoId}.png"
-        # screenshot_path = os.path.join(screenshot_dir, screenshot_name)
-        # logging.info(f"Saving screenshot to {screenshot_path}")
-        # puppet["driver"].save_screenshot(screenshot_path)
-        # logging.info(f"Screenshot saved to {screenshot_path}")
         logging.info(f"Skipping unavailable video {video.videoId}l")
         add_action(puppet, "watch", {"videoId": video.videoId, "error": str(e)})
     else:
@@ -121,54 +112,8 @@ def intervention(puppet, args):
     puppet_shared_dir = os.path.join(SHARED_DIR, puppet["puppetId"])
     os.makedirs(puppet_shared_dir, exist_ok=True)
 
-    # # Bootstrap: Fetch initial recommendations
-    # video_ids = get_recommendations(puppet, focus)
-    # with open(os.path.join(puppet_shared_dir, "recommendations_0.txt"), "w") as f:
-    #     f.write("\n".join(video_ids))
-
-    # # Start preprocessing for round 0
-    # try:
-    #     response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
-    #         "puppet_id": puppet["puppetId"],
-    #         "round_num": 0,
-    #         "intervention_type": intervention_type,
-    #         "focus": focus
-    #     }, timeout=30)
-    # except Exception as e:
-    #     logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
-    #     return
-    # if response.status_code != 200:
-    #     logging.error(f"Failed to start preprocess for round 0: {response.text}")
-    #     return
-    # logging.info("Started preprocessing for round 0")
-
-    # # Wait for preprocessing to complete
-    # while True:
-    #     try:
-    #         response = requests.post(f"{MONITOR_URL}/get_recommendations", json={
-    #             "puppet_id": puppet["puppetId"],
-    #             "round_num": 0,
-    #             "intervention_type": intervention_type,
-    #         }, timeout=30)
-    #         # logging.info(f"Polling /get_recommendations, status: {response.status_code}, text: {response.text}")
-    #     except Exception as e:
-    #         logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
-    #         return
-    #     if response.status_code == 200:
-    #         data = response.json()
-    #         next_video = data.get("next_video")
-    #         if not next_video:
-    #             logging.error(f"No next video received for round 0")
-    #             break
-    #         break
-    #     elif response.status_code == 500:
-    #         logging.error(f"Preprocessing failed for round 0: {response.text}")
-    #         break
-    #     logging.info("Waiting for preprocessing to complete for round 0")
-    #     time.sleep(5)
-
     # Intervention rounds
-    for round_num in range(0, rounds + 1):
+    for round_num in range(1, rounds + 1):
         add_action(puppet, f"round_{round_num}_start")
         
         # Fecth and dump the recommendations for this round
@@ -181,7 +126,7 @@ def intervention(puppet, args):
             response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
                 "puppet_id": puppet["puppetId"],
                 "round_num": round_num,
-                "intervention_type": intervention_type if round_num > 0 else "none",
+                "intervention_type": intervention_type,
                 "focus": focus
             }, timeout=30)
         except Exception as e:

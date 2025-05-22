@@ -18,9 +18,6 @@ os.makedirs(EXPERIMENT_DATA_DIR, exist_ok=True)
 # worker for binary classification
 def _binary_worker(args):
     batch_metadata, model_path, batch_size = args
-    # df = pd.DataFrame(batch_metadata)
-    # cls = RoBERTaClassifier(model_path, batch_size=batch_size)
-    # out = cls.classify_batch(df)
     req = requests.post('http://localhost:9000/classify_roberta', json={"metadata": batch_metadata})
     out = pd.DataFrame(req.json())
     return out["harm_score"].tolist()
@@ -28,9 +25,6 @@ def _binary_worker(args):
 # worker for multiclass classification
 def _multi_worker(args):
     batch_metadata, model_path, batch_size = args
-    # df = pd.DataFrame(batch_metadata)
-    # cls = MulticlassClassifier(model_path, batch_size=batch_size)
-    # out = cls.classify_batch(df)
     req = requests.post('http://localhost:9000/classify_multiclass', json={"metadata": batch_metadata})
     out = pd.DataFrame(req.json())
     return out["category"].tolist()
@@ -77,9 +71,10 @@ def save_harmless_pool(puppet_id, harmless_pool):
 
 def extract_metadata(video_ids, puppet_id):
     """Extract metadata for a batch of video IDs."""
-    metadata_extractor = MetadataExtractor(EXPERIMENT_DATA_DIR)
-    metadata = metadata_extractor.extract_metadata_batch(video_ids, puppet_id)
-    logging.info(f"Extracted metadata for {len(video_ids)} videos")
+    metadata_extractor = MetadataExtractor(redis_url='redis://localhost:6379/0')
+    logging.info(f"Extracting metadata Initialized")
+    metadata = metadata_extractor.extract_client(video_ids)
+    logging.info(f"Extracted metadata for {len(metadata)} videos")
     return metadata
 
 def classify_videos(metadata, batch_size=2):
@@ -222,13 +217,12 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
     harm_scores = classify_videos(metadata)
     categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold)
 
-    # Load or initialize harmless pool
-    harmless_pool = load_or_initialize_harmless_pool(puppet_id)
-
     # Apply intervention
     if intervention_type == "downrank":
         modified_video_ids, aligned_scores = apply_downrank_intervention(video_ids, harm_scores)
     elif intervention_type == "replace":
+        # Load or initialize harmless pool
+        harmless_pool = load_or_initialize_harmless_pool(puppet_id)
         modified_video_ids, aligned_scores, updated_pool = apply_replace_intervention(video_ids, harm_scores, harmful_indices, harmless_pool, harm_threshold)
         save_harmless_pool(puppet_id, updated_pool)  # Persist updated pool
     elif intervention_type == "none":  # none

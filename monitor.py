@@ -23,7 +23,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 active_processes = {}
-max_processes = 4
 
 def run_preprocess(puppet_id, round_num, intervention_type, focus, training=None):
     """

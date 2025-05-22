@@ -18,9 +18,9 @@ NUM_TRAINING_VIDEOS = 5
 WATCH_DURATION = 5
 
 PERCENTAGE_GROUPS = [50]
-PUPPETS_PER_GROUP = 2
+PUPPETS_PER_GROUP = 3
 
-ROUNDS = 10
+ROUNDS = 3
 
 # Setup logging
 logging.basicConfig(
@@ -142,7 +142,7 @@ def spawn_containers(args):
                         IMAGE_NAME,
                         command,
                         volumes=get_mount_volumes(),
-                        shm_size="1G",
+                        shm_size="512M",
                         remove=True,
                         detach=True,
                         network=args.network,
