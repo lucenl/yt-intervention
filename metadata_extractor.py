@@ -6,6 +6,23 @@ import requests
 import redis
 from flask import Flask, request, jsonify
 
+# Logging setup
+LOCAL_LOG_DIR = "./local_logs"
+os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
+log_file = os.path.join(LOCAL_LOG_DIR, "metadata_service.log")
+logging.basicConfig(
+    filename=log_file,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='a',
+    force=True
+)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(console_handler)
+
+
 KEYS_ENV = 'AIzaSyBGdcHykAwbhEND9MtC-3ZAYhiXXyfV1As, AIzaSyCBkf4tEdjaUzczm6cWcolDoZhzD6IQXQg, AIzaSyAW88VfM3okyJyv3y5AqsFAWWaG7VoU7RA'
 
 
@@ -27,6 +44,10 @@ class MetadataExtractor:
         self.REDIS_URL = redis_url
         self.cache = redis.Redis.from_url(self.REDIS_URL, decode_responses=True)
 
+    def get_redis_client(self):
+        """Return the Redis client for external use."""
+        return self.cache
+    
     def _get_next_key(self):
         key = self.api_keys[self._key_index]
         self._key_index = (self._key_index + 1) % len(self.api_keys)
@@ -47,7 +68,7 @@ class MetadataExtractor:
         results = []
         for item in items:
             vid = item.get('id')
-            print("vid: ", vid)
+            logging.info("vid: ", vid)
             snippet = item.get('snippet', {})
             data = {
                 'video_id': vid,
@@ -55,8 +76,25 @@ class MetadataExtractor:
                 'description': snippet.get('description', '')
             }
             results.append(data)
+        logging.info(f"Fetched metadata for {len(results)} videos")
         return results
 
+    def _save_metadata_to_file(self, items):
+        all_metadata = {}
+        if os.path.exists(self.metadata_file):
+            with open(self.metadata_file, 'r') as f:
+                try:
+                    all_metadata = json.load(f)
+                except json.JSONDecodeError:
+                    logging.warning(f"Corrupted {self.metadata_file}, starting fresh")
+        
+        for item in items:
+            all_metadata[item['video_id']] = item
+        
+        with open(self.metadata_file, 'w') as f:
+            json.dump(all_metadata, f, indent=4)
+        logging.info(f"Saved {len(items)} new metadata entries to {self.metadata_file}")
+        
     def register(self, app: Flask):
         """Attach /metadata endpoints directly to the given Flask app."""
 
@@ -69,11 +107,12 @@ class MetadataExtractor:
 
             # Redis hash 'metadata' stores video_id->JSON
             cached = self.cache.hgetall('metadata')
+            logging.info(f"Cached metadata with length: {len(cached)}")
             missing = [vid for vid in video_ids if vid not in cached]
-            print("Missing:", missing)
+            logging.info(f"Missing: {missing}")
 
             if missing:
-                print(f"Fetching metadata for missing IDs: {missing}")
+                logging.info(f"Fetching metadata for missing vidoes: {len(missing)}")
                 try:
                     new_items = self._fetch_metadata(missing)
                     for item in new_items:
@@ -81,6 +120,7 @@ class MetadataExtractor:
                     # Update local copy
                     for item in new_items:
                         cached[item['video_id']] = json.dumps(item)
+                    logging.info(f"Updated metadata cache with {len(new_items)} new items")
                 except Exception as e:
                     logging.error(f'Error fetching metadata for {missing}: {e}')
 
@@ -92,12 +132,14 @@ class MetadataExtractor:
                     try:
                         out.append(json.loads(raw))
                     except json.JSONDecodeError:
+                        logging.error(f"Failed to decode JSON for video ID {vid}: {raw}")
                         continue
-
+            logging.info(f"Returning metadata out for {len(out)} videos")
             # now rekey by video_id
             result_dict = {}
             for item in out:
                 result_dict[item['video_id']] = item
+            logging.info(f"Converted out to json dict: {len(result_dict)}")
             return jsonify(result_dict)
 
         @app.route('/metadata', methods=['POST'])
@@ -111,6 +153,8 @@ class MetadataExtractor:
                 if vid:
                     self.cache.hset('metadata', vid, json.dumps(item))
                     added += 1
+            logger.info(f"POST /metadata added {len(added)} items")
+            logger.info(f"Updated length of post_metadata: {len(self.cache.hset('metadata', vid, json.dumps(item)))}")
             return jsonify({'status': 'ok', 'added': added})
 
     @staticmethod

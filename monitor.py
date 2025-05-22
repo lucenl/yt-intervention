@@ -28,6 +28,7 @@ def run_preprocess(puppet_id, round_num, intervention_type, focus, training=None
     """
     Run preprocess.py to generate recommendations and next video.
     """
+    logger.info(f"run_preprocess() for round {round_num}")
     cmd = f"python preprocess.py {puppet_id} {round_num} {intervention_type} {focus}"
     if training:
         cmd += f" --training {','.join(training)}"
@@ -53,6 +54,7 @@ def start_preprocess():
 
     logger.info(f"Received start_preprocess request for {puppet_id}, round {round_num}")
     process = Process(target=run_preprocess, args=(puppet_id, round_num, intervention_type, focus, training))
+    logger.info(f"start_preprocess() for {puppet_id}, round {round_num}")
     process.start()
     key = f"{puppet_id}_{round_num}"
     active_processes[key] = process
@@ -71,7 +73,7 @@ def get_recommendations():
 
     rec_file = os.path.join(SHARED_DIR, puppet_id, f"recommendations_{round_num}.txt")
     next_video_file = os.path.join(SHARED_DIR, puppet_id, f"next_video_{round_num}.txt")
-
+    logger.info(f"get_recommendations() for {puppet_id}, round {round_num}")
     recommendations = []
     next_video = None
 
@@ -94,6 +96,7 @@ def get_recommendations():
 
 @app.route('/complete_round', methods=['POST'])
 def complete_round():
+    logger.info("complete_round(): Received complete_round request")
     data = request.get_json()
     puppet_id = data.get('puppet_id')
     round_num = data.get('round_num')
@@ -105,6 +108,8 @@ def complete_round():
             return jsonify({"status": "success"})
         else:
             return jsonify({"status": "pending", "message": "Process still running"}), 202
+    
+    logger.info("complete_round(): Complete complete_round request")
     return jsonify({"status": "error", "message": "Process not found"}), 404
 
 if __name__ == "__main__":

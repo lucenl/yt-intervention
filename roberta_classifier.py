@@ -118,7 +118,7 @@ class RoBERTaClassifier:
             DataFrame with an additional 'harm_score' column
         """
         # Prepare texts for classification
-        texts = [f"{row['title']} {row['description']} {row['transcript']}".strip() 
+        texts = [f"{row['title']} {row['description']}".strip() 
                  for _, row in metadata_df.iterrows()]
         
         # Classify texts
@@ -132,7 +132,7 @@ class MulticlassClassifier:
     """
     Multiclass classification using RoBERTa model to categorize harmful videos.
     """
-    def __init__(self, model_path, batch_size=64, logger=None):
+    def __init__(self, model_path, batch_size=32, logger=None):
         """
         Initialize multiclass classifier.
 
@@ -182,7 +182,7 @@ class MulticlassClassifier:
             DataFrame with an additional 'category' column
         """
         # Convert DataFrame to a dictionary format expected by tokenize_fn
-        texts = [f"{row['title']} {row['description']} {row['transcript']}".strip() 
+        texts = [f"{row['title']} {row['description']}".strip() 
                  for _, row in metadata_df.iterrows()]
         preds = self._classify_batch(texts)
         categories = [self.category_mapping[pred] for pred in preds]

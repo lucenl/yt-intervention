@@ -9,23 +9,38 @@ import pandas as pd
 import multiprocessing as mp
 import requests
 
-SHARED_DIR = "./shared"
+# Logging setup at module level
 LOCAL_LOG_DIR = "./local_logs"
+SHARED_DIR = "./shared"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
 os.makedirs(EXPERIMENT_DATA_DIR, exist_ok=True)
 
-# worker for binary classification
-def _binary_worker(args):
-    batch_metadata, model_path, batch_size = args
-    req = requests.post('http://localhost:9000/classify_roberta', json={"metadata": batch_metadata})
+# Global logger to be configured per puppet
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='a',
+    force=True
+)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(console_handler)
+
+_file_handler = None  # Will be set per puppet
+
+metadata_extractor = MetadataExtractor(redis_url='redis://localhost:6379/0')
+
+def _binary_worker(metadata):
+    """Send metadata to classify_roberta endpoint and return harm scores."""
+    req = requests.post('http://localhost:9000/classify_roberta', json={"metadata": metadata})
     out = pd.DataFrame(req.json())
     return out["harm_score"].tolist()
 
-# worker for multiclass classification
-def _multi_worker(args):
-    batch_metadata, model_path, batch_size = args
-    req = requests.post('http://localhost:9000/classify_multiclass', json={"metadata": batch_metadata})
+def _multi_worker(metadata):
+    """Send metadata to classify_multiclass endpoint and return categories."""
+    req = requests.post('http://localhost:9000/classify_multiclass', json={"metadata": metadata})
     out = pd.DataFrame(req.json())
     return out["category"].tolist()
 
@@ -71,44 +86,92 @@ def save_harmless_pool(puppet_id, harmless_pool):
 
 def extract_metadata(video_ids, puppet_id):
     """Extract metadata for a batch of video IDs."""
-    metadata_extractor = MetadataExtractor(redis_url='redis://localhost:6379/0')
-    logging.info(f"Extracting metadata Initialized")
     metadata = metadata_extractor.extract_client(video_ids)
     logging.info(f"Extracted metadata for {len(metadata)} videos")
     return metadata
 
-def classify_videos(metadata, batch_size=2):
-    """Classify videos using RoBERTa to determine harm scores."""
-    # split metadata into micro-batches
-    batches = [metadata[i : i + batch_size]
-               for i in range(0, len(metadata), batch_size)]
-    # for each, spawn a subprocess that loads its own classifier and then exits
-    with mp.Pool(processes=min(len(batches), 1)) as pool:
-        args = [(bat, "./models/binary", batch_size) for bat in batches]
-        results = pool.map(_binary_worker, args)
-    # flatten back into one list
-    harm_scores = [score for sub in results for score in sub]
-    logging.info(f"Classified videos with harm scores: {harm_scores}")
-    return harm_scores
+def classify_videos(metadata, video_ids):
+    redis_client = metadata_extractor.get_redis_client()
+    cached_scores = redis_client.hgetall('harm_scores')
+    logging.info(f"Cached harm_scores keys: {len(list(cached_scores.keys()))}...")
+    
+    harm_scores = {}
+    uncached_metadata = []
+    
+    for video_id in video_ids:
+        if video_id not in metadata:
+            logging.error(f"Metadata missing for video_id: {video_id}")
+            raise ValueError(f"Metadata missing for video_id: {video_id}")
+        item = metadata[video_id]
+        if not isinstance(item, dict) or 'video_id' not in item:
+            logging.error(f"Invalid metadata for video_id {video_id}: {item}")
+            raise ValueError(f"Invalid metadata for video_id {video_id}")
+        
+        if video_id in cached_scores:
+            try:
+                score = float(cached_scores[video_id])
+                harm_scores[video_id] = score
+                logging.debug(f"Retrieved cached score for {video_id}: {score}")
+            except ValueError:
+                logging.warning(f"Invalid harm score for {video_id}, reclassifying")
+                uncached_metadata.append(item)
+        else:
+            uncached_metadata.append(item)
+    
+    if uncached_metadata:
+        logging.info(f"Classifying {len(uncached_metadata)} uncached videos")
+        new_scores = _binary_worker(uncached_metadata)
+        
+        for item, score in zip(uncached_metadata, new_scores):
+            video_id = item['video_id']
+            harm_scores[video_id] = score
+            try:
+                redis_client.hset('harm_scores', video_id, str(score))
+                logging.debug(f"Cached score for {video_id}: {score}")
+            except Exception as e:
+                logging.error(f"Failed to cache score for {video_id}: {e}")
+        logging.info(f"Cached {len(new_scores)} new harm scores")
+    
+    harm_scores_list = [harm_scores[vid] for vid in video_ids]
+    logging.info(f"Final harm_scores: {harm_scores_list}")
+    return harm_scores_list
 
-def categorize_harmful_videos(metadata, harm_scores, harm_threshold, batch_size=2):
-    """Categorize harmful videos using a multiclass classifier."""
-    harmful_indices = [i for i, s in enumerate(harm_scores) if s > harm_threshold]
+def categorize_harmful_videos(metadata, harm_scores, harm_threshold, video_ids):
+    redis_client = metadata_extractor.get_redis_client()
+    cached_categories = redis_client.hgetall('categories')
+    logging.info(f"Cached categories keys: {list(cached_categories.keys())[:5]}...")
+    
     categories = [""] * len(harm_scores)
-    if harmful_indices:
-        # pull out only the harmful entries
-        harmful_md = [metadata[i] for i in harmful_indices]
-        # micro-batch them
-        batches = [harmful_md[i : i + batch_size]
-                   for i in range(0, len(harmful_md), batch_size)]
-        with mp.Pool(processes=min(len(batches), 1)) as pool:
-            args = [(bat, "./models/multiclass", batch_size) for bat in batches]
-            results = pool.map(_multi_worker, args)
-        cats = [c for sub in results for c in sub]
-        # reinsert into the full list
-        for idx, cat in zip(harmful_indices, cats):
+    harmful_indices = [i for i, s in enumerate(harm_scores) if s > harm_threshold]
+    
+    uncached_harmful_md = []
+    uncached_harmful_indices = []
+    
+    for idx in harmful_indices:
+        video_id = video_ids[idx]
+        if not isinstance(metadata[video_id], dict) or 'video_id' not in metadata[video_id]:
+            logging.error(f"Invalid metadata for video_id {video_id}: {metadata[video_id]}")
+            raise ValueError(f"Invalid metadata for video_id {video_id}")
+        if video_id in cached_categories:
+            categories[idx] = cached_categories[video_id]
+            logging.debug(f"Retrieved cached category for {video_id}: {categories[idx]}")
+        else:
+            uncached_harmful_md.append(metadata[video_id])
+            uncached_harmful_indices.append(idx)
+    
+    if uncached_harmful_md:
+        logging.info(f"Categorizing {len(uncached_harmful_md)} uncached harmful videos")
+        new_cats = _multi_worker(uncached_harmful_md)
+        
+        for idx, cat, item in zip(uncached_harmful_indices, new_cats, uncached_harmful_md):
             categories[idx] = cat
-
+            try:
+                redis_client.hset('categories', item['video_id'], cat)
+                logging.debug(f"Cached category for {item['video_id']}: {cat}")
+            except Exception as e:
+                logging.error(f"Failed to cache category for {item['video_id']}: {e}")
+        logging.info(f"Cached {len(new_cats)} new categories")
+    
     logging.info(f"Assigned categories: {categories}")
     return categories, harmful_indices
 
@@ -198,25 +261,32 @@ def signal_completion(puppet_shared_dir, round_num):
 
 def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
     """Main preprocessing function coordinating the pipeline."""
+    global _file_handler
+    if _file_handler:
+        logging.getLogger().removeHandler(_file_handler)
+    log_file = os.path.join(LOCAL_LOG_DIR, f"{puppet_id}_preprocess.log")
+    _file_handler = logging.FileHandler(log_file, mode='a')
+    _file_handler.setLevel(logging.INFO)
+    _file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(_file_handler)
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"Preprocess(): Starting preprocessing for puppet {puppet_id}, round {round_num}, intervention {intervention_type}")
+    
+    # Get recomendations from the previous round
     puppet_shared_dir = os.path.join(SHARED_DIR, puppet_id)
     with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "r") as f:
         video_ids = f.read().splitlines()
-    # Setup logging
-    log_file = os.path.join(LOCAL_LOG_DIR, f"{puppet_id}_preprocess.log")
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        filemode='a'
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Starting preprocessing for puppet {puppet_id}, round {round_num}")
-
+    
+    logger.info(f"Preprocess(): Loaded recomendations IDs for round {round_num}")
+    
     # Extract and classify data
     metadata = extract_metadata(video_ids, puppet_id)
-    harm_scores = classify_videos(metadata)
-    categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold)
-
+    logger.info(f"Preprocess(): Extract metadata for round {round_num}")
+    harm_scores = classify_videos(metadata, video_ids)
+    categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold, video_ids)
+    logger.info(f"Preprocess(): Classified video for round {round_num}")
+    
     # Apply intervention
     if intervention_type == "downrank":
         modified_video_ids, aligned_scores = apply_downrank_intervention(video_ids, harm_scores)
@@ -227,14 +297,20 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
         save_harmless_pool(puppet_id, updated_pool)  # Persist updated pool
     elif intervention_type == "none":  # none
         modified_video_ids, aligned_scores = apply_no_intervention(video_ids)
+    
+    logger.info(f"Preprocess(): Finished intervention for round {round_num}")
 
     # Select video
     selected_video_id, _ = select_video_decay_weighted(modified_video_ids, aligned_scores)
-
+    logger.info(f"Preprocess(): Finished selection for round {round_num}")
+    
     # Save results
     save_experiment_data(puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id)
+    logger.info(f"Preprocess(): Save experiemnets results for round {round_num}")
     save_next_video(puppet_shared_dir, round_num, selected_video_id)
+    logger.info(f"Preprocess(): save next video for round {round_num}")
     signal_completion(puppet_shared_dir, round_num)
+    logger.info(f"Preprocess(): Signaled completion for round {round_num}")
 
 if __name__ == "__main__":
     import sys
