@@ -15,7 +15,7 @@ MONITOR_URL = "http://host.docker.internal:5000"
 
 def init_puppet(puppetId, profile_dir):
     puppet = {
-        "driver": YTDriver(profile_dir=profile_dir, use_virtual_display=True, headless=True),
+        "driver": YTDriver(profile_dir=profile_dir, use_virtual_display=True),
         "puppetId": puppetId,
         "actions": [],
         "start_time": datetime.now()
@@ -35,7 +35,7 @@ def add_action(puppet, action, params=None):
 
 def get_recommendations(puppet, focus, round_num=None):
     max_retries = 3
-    retry_delay = 5
+    retry_delay = 3
     for attempt in range(max_retries):
         try:
             if focus == "homepage":
@@ -44,19 +44,6 @@ def get_recommendations(puppet, focus, round_num=None):
                 recommendations = puppet["driver"].get_upnext_recommendations(topn=12)
             video_ids = [vid.videoId for vid in recommendations]
             if not video_ids:
-                logging.warning(f"Attempt {attempt + 1}/{max_retries}: No recommendations for {focus}")
-                screenshot_dir = os.path.join(OUTPUT_DIR, "screenshots", puppet["puppetId"])
-                os.makedirs(screenshot_dir, exist_ok=True)
-                logging.info(f"Saving screenshot for unavailable video {video_ids}")
-                screenshot_name = f"{error}_{round_num}_recs_{attempt + 1}.png"
-                screenshot_path = os.path.join(screenshot_dir, screenshot_name)
-                logging.info(f"Saving screenshot to {screenshot_path}")
-                screenshot = puppet["driver"].save_screenshot(screenshot_path)
-                logging.info(f"Screenshot saved to {screenshot_path}")
-                if screenshot:
-                    logging.error(f"Saved screenshot to {screenshot_path}")
-                else:
-                    logging.error(f"Failed to save screenshot for unavailable video {video.videoId}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
@@ -123,12 +110,14 @@ def intervention(puppet, args):
 
         # Start preprocessing for this round
         try:
+            logging.info(f"Intervention(): Starting preprocessing for round {round_num}")
             response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
                 "puppet_id": puppet["puppetId"],
                 "round_num": round_num,
                 "intervention_type": intervention_type,
                 "focus": focus
-            }, timeout=30)
+            })
+            logging.info(f"Intervention(): requests for preprocess")
         except Exception as e:
             logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
             return
@@ -139,11 +128,13 @@ def intervention(puppet, args):
         # Wait for preprocessing to complete and get recommendations
         while True:
             try:
+                logging.info(f"Intervention():get recommendations for round {round_num}")
                 response = requests.post(f"{MONITOR_URL}/get_recommendations", json={
                     "puppet_id": puppet["puppetId"],
                     "round_num": round_num,
                     "intervention_type": intervention_type,
-                }, timeout=30)
+                })
+                logging.info(f"Intervention(): request recommendations for round {round_num}")
             except Exception as e:
                 logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
                 return
@@ -159,17 +150,21 @@ def intervention(puppet, args):
                 logging.error(f"Preprocessing failed for round {round_num}: {response.text}")
                 return 
             logging.info(f"Waiting for preprocessing to complete for round {round_num}")
-            time.sleep(5)
+            time.sleep(2)
 
         # Watch the video
+        logging.info(f"Intervention():Watching video {next_video} for round {round_num}")
         selected_video = Video(None, make_url(next_video))
         watch(puppet, selected_video, args["duration"])
-
+        logging.info(f"Intervention():Finished watching video {next_video} for round {round_num}")
+        
         # Signal round completion
+        logging.info(f"Intervention():Signaling completion for round {round_num}")
         response = requests.post(f"{MONITOR_URL}/complete_round", json={
             "puppet_id": puppet["puppetId"],
             "round_num": round_num
-        }, timeout=30)
+        })
+        logging.info(f"Intervention(): requests for complete round")
         if response.status_code != 200:
             logging.warning(f"Round {round_num} completion not acknowledged: {response.text}")
         logging.info(f"Signaled completion for round {round_num}")

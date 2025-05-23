@@ -15,6 +15,12 @@ logs_*/
 output/
 output_*/
 
+expriment_data/
+expriment_data_*/
+
+shared/
+shared_*/
+
 # build folders
 dist/
 out/

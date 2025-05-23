@@ -17,9 +17,6 @@ ENV DISPLAY=:99
 
 # copy items
 WORKDIR /app
-# COPY data/training/ ./data/training/
-# COPY arguments/harmful_50_1,38eb77f8.json ./args/harmful_50_1,38eb77f8.json
-
 # Install pre-dependencies
 RUN apt update
 RUN apt install -y wget g++ unzip xvfb git
@@ -30,7 +27,7 @@ RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd6
     rm google-chrome-stable_current_amd64.deb
 
 # install python dependencies
-RUN pip install --upgrade git+https://github.com/lucenl/YouTube-Driver.git
+RUN pip install --upgrade git+https://github.com/Haroon96/YouTube-Driver.git
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
