@@ -182,13 +182,6 @@ def make_redis_client():
         kwargs['password'] = parsed.password
     return redis.Redis(**kwargs)
 
-# Example usage in monitor.py:
-# from metadata_service import MetadataService
-# from flask import Flask
-# app = Flask(__name__)
-# svc = MetadataService()
-# svc.register(app)
-
 # If run standalone:
 if __name__ == '__main__':
     from urllib.parse import urlparse

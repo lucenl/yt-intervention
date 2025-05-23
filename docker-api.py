@@ -14,13 +14,13 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
 SHARED_DIR = os.path.join(os.getcwd(), "shared")
 
-NUM_TRAINING_VIDEOS = 5
-WATCH_DURATION = 5
+NUM_TRAINING_VIDEOS = 10
+WATCH_DURATION = 10
 
 PERCENTAGE_GROUPS = [50]
-PUPPETS_PER_GROUP = 3
+PUPPETS_PER_GROUP = 30
 
-ROUNDS = 3
+ROUNDS = 30
 
 # Setup logging
 logging.basicConfig(
