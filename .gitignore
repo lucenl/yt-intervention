@@ -1,29 +1,7 @@
-# log files
+data
+debug-logs
+*.logs
 *.log
-*.png
-*.csv
-*.json
-*.txt
-.*xlsx
-
-
-# any folder named logs or starting with logs_
-logs/
-logs_*/
-
-# output folders
-output/
-output_*/
-
-expriment_data/
-expriment_data_*/
-
-shared/
-shared_*/
-
-# build folders
-dist/
-out/
-
-# models
-roberta/
+logs
+output
+shared
