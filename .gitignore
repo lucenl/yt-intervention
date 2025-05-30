@@ -1,0 +1,46 @@
+# log files
+*.log
+*.png
+*.csv
+*.json
+*.txt
+*.xlsx
+
+# Add this line for Python cache:
+__pycache__/
+*.pyc
+
+
+# any folder named logs or starting with logs
+logs/
+logs_*/
+local_logs/
+local_logs_*/
+debug-logs/
+debug_locallogs/
+shared/
+shared*/
+debug-output/
+debug-shared/
+debug-local_logs/
+debug-experiment_data/
+
+# output folders
+debug-output/
+output/
+output_*/
+
+experiments/
+experiment_data_*/
+debug_experiment_data/
+experiment_data/
+
+# build folders
+dist/
+out/
+
+monitor-logs/
+preprocess-logs/
+
+# models
+models/
