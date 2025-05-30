@@ -10,16 +10,21 @@
 # any folder named logs or starting with logs_
 logs/
 logs_*/
+local_logs/
+debug_logs/
+debug_local_logs/
 
 # output folders
+debug_output/
 output/
 output_*/
 
-expriment_data/
-expriment_data_*/
+experiments/
+experiments_data_*/
 
 shared/
 shared_*/
+debug_shared/
 
 # build folders
 dist/
