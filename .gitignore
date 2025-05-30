@@ -4,15 +4,25 @@
 *.csv
 *.json
 *.txt
-.*xlsx
+*.xlsx
 
+# Add this line for Python cache:
+__pycache__/
+*.pyc
 
 # any folder named logs or starting with logs_
 logs/
 logs_*/
 local_logs/
-debug_logs/
+local_logs_*/
+debug-logs/
 debug_local_logs/
+shared/
+shared_*/
+debug-output/
+debug-shared/
+debug-local_logs/
+debug-experiment_data/
 
 # output folders
 debug_output/
@@ -20,15 +30,16 @@ output/
 output_*/
 
 experiments/
-experiments_data_*/
-
-shared/
-shared_*/
-debug_shared/
+experiment_data_*/
+debug_experiment_data/
+experiment_data/
 
 # build folders
 dist/
 out/
 
+monitor-logs/
+preprocess-logs/
+
 # models
-roberta/
+models/
