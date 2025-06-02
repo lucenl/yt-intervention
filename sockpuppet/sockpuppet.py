@@ -6,6 +6,7 @@ from datetime import datetime
 from ytdriver import YTDriver, Video, VideoUnavailableException
 import sys
 import requests
+from time import perf_counter
 
 # Constants
 SHARED_DIR = "/shared"
@@ -26,12 +27,13 @@ def make_url(videoId):
     return "https://youtube.com/watch?v=" + videoId
 
 def add_action(puppet, action, params=None):
-    logging.info(f"Action: {action}, Params: {params}")
-    puppet["actions"].append({
+    action = {
         "action": action,
         "params": params,
         "timestamp": datetime.now().isoformat()
-    })
+    }
+    logging.info(f"Action: {action}, Params: {params}, Timestamp: {action['timestamp']}")
+    puppet["actions"].append(action)
 
 def get_recommendations(puppet, focus, round_num=None):
     max_retries = 3
@@ -82,15 +84,22 @@ def save_puppet(puppet, args):
     logging.info(f"Saved puppet state to {puppet_file}")
 
 def train(puppet, args):
+    start = perf_counter()
     logging.info(f"Starting training for puppet {puppet['puppetId']}")
     add_action(puppet, "training_start")
     training = args.get("training", [])
     for videoId in training[:int(args["trainingN"])]:
         video = Video(None, make_url(videoId))
+        start_watch = perf_counter()
         watch(puppet, video, args["duration"])
+        end_watch = perf_counter()
+        logging.info(f"Watched video {videoId} for {args['duration']} seconds in {end_watch - start_watch:.2f} seconds")
     add_action(puppet, "training_end")
+    end = perf_counter()
+    logging.info(f"Training completed for puppet {puppet['puppetId']} in {end - start:.2f} seconds")
 
 def intervention(puppet, args):
+    intervention_start = perf_counter()
     logging.info(f"Starting intervention for puppet {puppet['puppetId']}")
     add_action(puppet, "intervention_start")
     rounds = int(args.get("rounds", 10))
@@ -104,11 +113,13 @@ def intervention(puppet, args):
         add_action(puppet, f"round_{round_num}_start")
         
         # Fecth and dump the recommendations for this round
+        start = perf_counter()
         recs = get_recommendations(puppet, focus, round_num)
         with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "w") as f:
             f.write("\n".join(recs))
 
         # Start preprocessing for this round
+        start = perf_counter()
         try:
             logging.info(f"Intervention(): Starting preprocessing for round {round_num}")
             response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
@@ -124,8 +135,10 @@ def intervention(puppet, args):
         if response.status_code != 200:
             logging.error(f"Failed to start preprocess for round {round_num}: {response.text}")
             break
-
+        logging.info(f"Start preprocess took {perf_counter() - start:.2f} seconds")
+        
         # Wait for preprocessing to complete and get recommendations
+        start = perf_counter()
         while True:
             try:
                 logging.info(f"Intervention():get recommendations for round {round_num}")
@@ -151,14 +164,18 @@ def intervention(puppet, args):
                 return 
             logging.info(f"Waiting for preprocessing to complete for round {round_num}")
             time.sleep(2)
+        logging.info(f"Waiting for preprocessing to complete for round {round_num}")
 
         # Watch the video
+        start = perf_counter()
         logging.info(f"Intervention():Watching video {next_video} for round {round_num}")
         selected_video = Video(None, make_url(next_video))
         watch(puppet, selected_video, args["duration"])
         logging.info(f"Intervention():Finished watching video {next_video} for round {round_num}")
+        logging.info(f"Watching video took {perf_counter() - start:.2f} seconds")
         
         # Signal round completion
+        start = perf_counter()
         logging.info(f"Intervention():Signaling completion for round {round_num}")
         response = requests.post(f"{MONITOR_URL}/complete_round", json={
             "puppet_id": puppet["puppetId"],
@@ -169,9 +186,12 @@ def intervention(puppet, args):
             logging.warning(f"Round {round_num} completion not acknowledged: {response.text}")
         logging.info(f"Signaled completion for round {round_num}")
 
+        logging.info(f"Round {round_num} cleanup completed in {perf_counter() - start:.2f} seconds")
         add_action(puppet, f"round_{round_num}_end")
 
     add_action(puppet, "intervention_end")
+    end = perf_counter()
+    logging.info(f"Intervention completed for puppet {puppet['puppetId']} in {end - intervention_start:.2f} seconds")
 
 if __name__ == "__main__":
     args = json.loads(sys.argv[1])

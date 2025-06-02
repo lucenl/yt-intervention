@@ -1,96 +1,138 @@
-import re
-import os
+import json
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator, FormatStrFormatter
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+import os
+import random
+import argparse
 
-# Directory containing the log files
-log_dir = "./success_intervention_logs"  # Adjust this path to where your log files are stored
+# Simulate base paths (user would replace these)
+combined_dir = "./combined_puppets"
+# Simulated paths
+cache_path = ".processing_cache.json"
 
-# List of log files to process
-log_files = [
-    "harmful_30,d862ec0a_intervention_downrank_homepage.log",
-    "harmful_50,33838ef7_intervention_downrank_homepage.log"
-]
+# Simulated loading from the processing cache
+def load_cache(cache_path):
+    with open(cache_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-# Pattern to match "Found X harmful videos out of Y"
-pattern = re.compile(r"Found (\d+) harmful videos out of (\d+)")
+# Simulated reading all combined puppet JSONs
+def load_combined_puppets(combined_dir):
+    puppet_data = {}
+    for file in Path(combined_dir).glob("*.json"):
+        with open(file, "r", encoding="utf-8") as f:
+            puppet_data[file.stem] = json.load(f)
+    return puppet_data
 
-# Dictionary to store harmful videos per round for each experiment
-experiment_data = {}
+def visualize_harmful_exposure_trends(focus_filter):
+    """
+    Visualizes harmful exposure trends based on the processed puppets and their arguments.
+    Focuses on the number of harmful videos across different rounds, grouped by focus, percentage, and intervention type.
+    """
+        
+    # Load data
+    cache = load_cache(cache_path)
+    combined = load_combined_puppets(combined_dir)
 
-# Process each specified log file
-for log_file in log_files:
-    log_path = os.path.join(log_dir, log_file)
-    
-    if not os.path.exists(log_path):
-        print(f"Log file {log_path} not found, skipping...")
-        continue
-    
-    harmful_videos_per_round = []
-    current_round = 0
-    
-    with open(log_path, 'r') as f:
-        for line in f:
-            # Check for round start to track round number
-            if "Starting round" in line:
-                current_round += 1
-            # Look for harmful videos line
-            match = pattern.search(line)
-            if match:
-                harmful_videos = int(match.group(1))
-                total_videos = int(match.group(2))
-                # Ensure rounds align (in case logs are out of order)
-                while len(harmful_videos_per_round) < current_round:
-                    harmful_videos_per_round.append(0)
-                harmful_videos_per_round[current_round - 1] = harmful_videos
-    
-    # Use the log file name (without path) as the experiment name
-    exp_name = log_file.replace("_intervention_downrank_homepage.log", "")
-    experiment_data[exp_name] = harmful_videos_per_round
+    # Grouping structure: (focus, percentage, intervention) -> list of [num_harmful_videos for each round]
+    grouped_trends = defaultdict(list)
+    max_rounds = 30
 
-# Check if we have any data to plot
-if not experiment_data:
-    print("No data extracted from log files. Exiting.")
-    exit()
+    for puppet_id, info in cache["processed_puppets"].items():
+        if info.get("status") != "success":
+            continue
+        args = info.get("arguments", {})
+        if not args:
+            continue
+        focus = args.get("focus")
+        perc = args.get("harmful_percentage")
+        intervention = args.get("intervention_type")
+        if not all([focus, perc is not None, intervention]):
+            continue
+        key = (focus, perc, intervention)
+        puppet_json = combined.get(puppet_id)
+        if not puppet_json:
+            continue
+        rounds = puppet_json.get("rounds", {})
+        harm_per_round = []
+        for i in range(1, max_rounds + 1):
+            r = rounds.get(f"round_{i}", {})
+            harm_count = r.get("num_harmful_videos", 0)
+            harm_per_round.append(harm_count)
+        grouped_trends[key].append(harm_per_round)
 
-# Plotting each experiment in a separate figure
-for exp_name, harmful_videos in experiment_data.items():
-    rounds = list(range(1, len(harmful_videos) + 1))
-    
-    # Create a new figure for each experiment
-    plt.figure(figsize=(8, 5))
-    plt.plot(rounds, harmful_videos, marker='o', label=exp_name, color='blue')
-    
-    # Customize the plot
-    plt.title(f"Number of Harmful Videos per Round\n({exp_name})")
-    plt.xlabel("Round")
-    plt.ylabel("Number of Harmful Videos")
-    
-    # Create a sparse x-axis by labeling every nth round
-    num_rounds = len(rounds)
-    if num_rounds > 5:  # Only sparsify if there are more than 5 rounds
-        step = max(1, num_rounds // 5)  # Aim for ~5 labels
-        sparse_ticks = list(range(1, num_rounds + 1, step))
-        # Ensure the last round is included if it's not in the sparse ticks
-        if sparse_ticks[-1] != num_rounds:
-            sparse_ticks.append(num_rounds)
-        plt.xticks(sparse_ticks)
-    else:
-        plt.xticks(rounds)
-    
-    # Force y-axis to show only integer ticks
-    plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
-    plt.gca().yaxis.set_major_formatter(FormatStrFormatter('%d'))  # Ensure no decimals (e.g., 0, not 0.0)
-    
-    # Ensure x-axis also shows integers without decimals
-    plt.gca().xaxis.set_major_formatter(FormatStrFormatter('%d'))
-    
-    plt.grid(True)
-    plt.legend()
-    
-    # Save the plot to a file (unique filename for each experiment)
-    output_filename = f"harmful_videos_per_round_{exp_name}.png"
-    plt.savefig(output_filename)
-    plt.close()  # Close the figure to free memory
+    # Filter keys by focus
+    filtered_keys = {
+        k: v for k, v in grouped_trends.items()
+        if focus_filter == "both" or k[0] == focus_filter
+    }
 
-print("Plots generated successfully.")
+    # Determine min size only from filtered keys
+    all_group_sizes = {k: len(v) for k, v in filtered_keys.items()}
+    global_min_size = min(all_group_sizes.values())
+
+    print(f"[{focus_filter}] Balancing all filtered settings to {global_min_size} puppets per condition")
+
+    # Average using only filtered_keys
+    averaged_trends = defaultdict(dict)
+
+    random.seed(42)
+
+    for (focus, perc, intervention), traces in filtered_keys.items():
+        if len(traces) > global_min_size:
+            sampled_traces = random.sample(traces, global_min_size)
+        else:
+            sampled_traces = traces
+        avg_trace = np.mean(np.array(sampled_traces), axis=0)
+        averaged_trends[(focus, perc)][intervention] = avg_trace
+
+    # Sort values
+    foci = sorted({k[0] for k in averaged_trends})
+    percentages = sorted({k[1] for k in averaged_trends})
+    interventions = sorted({i for d in averaged_trends.values() for i in d})
+
+    # Plotting
+    fig, axes = plt.subplots(len(foci), len(percentages), figsize=(4 * len(percentages), 4), sharex=True, sharey=True)
+
+    # Always ensure axes is 2D array
+    if len(foci) == 1 and len(percentages) == 1:
+        axes = np.array([[axes]])
+    elif len(foci) == 1:
+        axes = axes[np.newaxis, :]  # shape (1, N)
+    elif len(percentages) == 1:
+        axes = axes[:, np.newaxis]  # shape (N, 1)
+
+
+    for i, focus in enumerate(foci):
+        for j, perc in enumerate(percentages):
+            ax = axes[i][j]
+            key = (focus, perc)
+            if key in averaged_trends:
+                for intervention in interventions:
+                    if intervention in averaged_trends[key]:
+                        ax.plot(range(1, max_rounds + 1), averaged_trends[key][intervention], label=intervention)
+            ax.set_title(f"{focus} - {perc}%")
+            if i == len(foci) - 1:
+                ax.set_xlabel("Round")
+            if j == 0:
+                ax.set_ylabel("Avg # Harmful Videos")
+            ax.grid(True)
+            ax.legend()
+
+    fig.suptitle("Harmful Exposure Trends", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(f"harmful_exposure_trends_{focus_filter}.png", dpi=300)
+    plt.show()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--focus-filter", choices=["homepage", "upnext", "both"], default="both",
+        help="Which focus group(s) to include: homepage, upnext, or both"
+    )
+    args = parser.parse_args()
+    visualize_harmful_exposure_trends(focus_filter=args.focus_filter)
+    
+    
