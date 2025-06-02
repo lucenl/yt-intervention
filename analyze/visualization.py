@@ -7,37 +7,35 @@ import os
 import random
 import argparse
 
-# Simulate base paths (user would replace these)
 combined_dir = "./combined_puppets"
-# Simulated paths
 cache_path = ".processing_cache.json"
+max_rounds = 30
+HOME_RECS = 25
+UPNEXT_RECS = 12
 
-# Simulated loading from the processing cache
 def load_cache(cache_path):
     with open(cache_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# Simulated reading all combined puppet JSONs
 def load_combined_puppets(combined_dir):
     puppet_data = {}
-    for file in Path(combined_dir).glob("*.json"):
+    files = list(Path(combined_dir).glob("*.json"))
+    print(f"Loading {len(files)} combined puppet files...")
+    
+    for idx, file in enumerate(files):
+        if idx % 100 == 0:
+            print(f"Loading file {idx}/{len(files)}: {file.name}")
         with open(file, "r", encoding="utf-8") as f:
             puppet_data[file.stem] = json.load(f)
     return puppet_data
 
-def visualize_harmful_exposure_trends(focus_filter):
+def visualize_harmful_exposure_trends(cache, combined, focus_filter):
     """
     Visualizes harmful exposure trends based on the processed puppets and their arguments.
     Focuses on the number of harmful videos across different rounds, grouped by focus, percentage, and intervention type.
     """
-        
-    # Load data
-    cache = load_cache(cache_path)
-    combined = load_combined_puppets(combined_dir)
-
     # Grouping structure: (focus, percentage, intervention) -> list of [num_harmful_videos for each round]
     grouped_trends = defaultdict(list)
-    max_rounds = 30
 
     for puppet_id, info in cache["processed_puppets"].items():
         if info.get("status") != "success":
@@ -125,6 +123,84 @@ def visualize_harmful_exposure_trends(focus_filter):
     plt.savefig(f"harmful_exposure_trends_{focus_filter}.png", dpi=300)
     plt.show()
 
+def visualize_cdf(cache, combined, focus_filter):
+    """
+    Visualizes the CDF of harmful exposure (ratio of harmful videos per puppet) grouped by focus and harmful_percentage.
+    Each line in the plot corresponds to a different intervention type.
+    """
+    grouped_ratios = defaultdict(lambda: defaultdict(list))  # (focus, percentage) -> intervention -> [harm_ratios]
+
+    for puppet_id, info in cache["processed_puppets"].items():
+        if info.get("status") != "success":
+            continue
+        args = info.get("arguments", {})
+        if not args:
+            continue
+        focus = args.get("focus")
+        perc = args.get("harmful_percentage")
+        intervention = args.get("intervention_type")
+        if not all([focus, perc is not None, intervention]):
+            continue
+        if focus_filter != "both" and focus != focus_filter:
+            continue
+
+        puppet_json = combined.get(puppet_id)
+        if not puppet_json:
+            continue
+        rounds = puppet_json.get("rounds", {})
+        total_harm = 0
+        total_recs = 0
+        for r in rounds.values():
+            total_harm += r.get("num_harmful_videos", 0)
+            total_recs += HOME_RECS if focus == "homepage" else UPNEXT_RECS
+        if total_recs == 0:
+            continue
+        harm_ratio = total_harm / total_recs
+        grouped_ratios[(focus, perc)][intervention].append(harm_ratio)
+
+    foci = sorted({k[0] for k in grouped_ratios})
+    percentages = sorted({k[1] for k in grouped_ratios})
+    interventions = sorted({i for d in grouped_ratios.values() for i in d})
+
+    fig, axes = plt.subplots(1, len(foci), figsize=(6 * len(foci), 5), sharey=True)
+
+    if len(foci) == 1:
+        axes = [axes]  # Make it iterable
+
+    for i, focus in enumerate(foci):
+        ax = axes[i]
+        for perc in percentages:
+            key = (focus, perc)
+            if key not in grouped_ratios:
+                continue
+            for intervention in interventions:
+                values = grouped_ratios[key].get(intervention)
+                if not values:
+                    continue
+                sorted_vals = np.sort(values)
+                yvals = np.arange(1, len(sorted_vals)+1) / len(sorted_vals)
+                ax.plot(sorted_vals, yvals, label=f"{intervention} ({perc}%)")
+        ax.set_title(f"{focus}")
+        ax.set_xlabel("Harmful Video Ratio per Puppet")
+        ax.set_ylabel("CDF")
+        ax.grid(True)
+        ax.legend()
+
+    fig.suptitle("CDF of Harmful Exposure by Intervention", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(f"harmful_exposure_cdf_{focus_filter}.png", dpi=300)
+    plt.show()
+
+
+def main(plot_type, focus_filter):
+    cache = load_cache(cache_path)
+    combined = load_combined_puppets(combined_dir)
+    if plot_type == "trends":
+        visualize_harmful_exposure_trends(cache, combined, focus_filter)
+    elif plot_type == "cdf":
+        visualize_cdf(cache, combined, focus_filter)
+    else:
+        raise ValueError("Invalid plot type. Choose 'trends' or 'cdf'.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -132,7 +208,10 @@ if __name__ == "__main__":
         "--focus-filter", choices=["homepage", "upnext", "both"], default="both",
         help="Which focus group(s) to include: homepage, upnext, or both"
     )
+    parser.add_argument(
+        "--plot-type", choices=["trends", "cdf"], default="cdf",
+        help="Which plot to generate: trends (line plot per round) or cdf (harmful ratio CDF)"
+    )
     args = parser.parse_args()
-    visualize_harmful_exposure_trends(focus_filter=args.focus_filter)
-    
-    
+
+    main(args.plot_type, args.focus_filter)

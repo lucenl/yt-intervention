@@ -175,7 +175,7 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
             print(f"  Successful puppets: {success_file}")
             print(f"  Failed puppets: {failed_file}")
             
-            return len(all_puppets), len(successful_puppets), len(failed_puppets), failed_puppets
+            return all_puppets, all_successful, all_failed
         
         # Process only new puppets
         new_successful = []
@@ -247,7 +247,7 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
         print(f"  Successful puppets: {success_file}")
         print(f"  Failed puppets: {failed_file}")
         
-        return len(all_puppets), len(all_successful), len(all_failed), all_failed
+        return all_puppets, all_successful, all_failed
         
     except Exception as e:
         print(f"Error in incremental stats: {e}")
@@ -272,6 +272,7 @@ def collect_puppet_args(base_dir, output_dir):
     
     # Only check puppets we know are successful and don't have metadata
     successful_puppets = tracker.get_successful_puppets()
+    failed_puppets = tracker.get_failed_puppets()
     
     # Map source dir to source name
     SOURCE_MAP = {
@@ -279,21 +280,24 @@ def collect_puppet_args(base_dir, output_dir):
         "/media/data/lucen/codebase/yt-sock-puppet/output/synced-puppets/puppets": "Haroon",
         "/media/data/lucen/codebase/yt-sock-puppet/output/wv/puppets": "WV",
     }
-    
-    puppet_ids_in_args_dir = {
-        f.stem for f in output_path.iterdir() if f.is_file() and f.suffix == ".json"
-    }
+  
+    puppet_id_to_source = {}
+    for src_dir, source_name in SOURCE_MAP.items():
+        path = Path(src_dir).resolve()
+        num_puppets = 0
+        for file in path.glob("*.json"):
+            puppet_id = file.stem
+            puppet_id_to_source[puppet_id] = source_name
+            num_puppets += 1
 
-    print(f"Found {len(puppet_ids_in_args_dir)} puppets in output directory: {output_path}")
+        print(f"Found {num_puppets} puppets in output directory: {src_dir}")
         
-    # Filter successful puppets to only those that have corresponding output directories
-    for puppet_id in successful_puppets:
-        
-        if puppet_id in puppet_ids_in_args_dir:
-            # Add source to cache
-            source_dir = str(Path(output_dir).resolve())
-            source_name = SOURCE_MAP.get(source_dir) 
-            tracker.cache["processed_puppets"][puppet_id]["source"] = source_name
+    for puppet_id in successful_puppets + failed_puppets:
+
+        source_name = puppet_id_to_source.get(puppet_id)
+        if source_name:
+            tracker.cache["processed_puppets"].setdefault(puppet_id, {})["source"] = source_name
+
 
         # Skip if already has metadata
         puppet_info = tracker.cache["processed_puppets"].get(puppet_id, {})
@@ -509,42 +513,46 @@ def stats_shell(base_dir, expected_rounds, output_prefix="experiment_stats"):
     return incremental_stats_analysis(base_dir, expected_rounds, output_prefix, use_shell=True)
 
     
-def summarize_puppet_counts_by_source(base_dir):
-    from collections import defaultdict
-    tracker = ProcessingTracker(base_dir)
+def summarize_success_failure_by_source(base_dir, successful_puppets, failed_puppets):
+    base_path = Path(base_dir)
+    tracker = ProcessingTracker(base_dir) 
     cache = tracker._load_cache()
     
-    stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    total_stats = defaultdict(lambda: defaultdict(int))
+    from collections import defaultdict
+    source_to_success = defaultdict(set)
+    source_to_failure = defaultdict(set)
 
-    for puppet_id, info in cache["processed_puppets"].items():
-        if info.get("status") != "success":
+    for pid in successful_puppets:
+        source = cache["processed_puppets"].get(pid, {}).get("source", "Unknown")
+        source_to_success[source].add(pid)
+
+    for pid in failed_puppets:
+        source = cache["processed_puppets"].get(pid, {}).get("source", "Unknown")
+        source_to_failure[source].add(pid)
+
+    all_sources = sorted(set(source_to_success) | set(source_to_failure))
+    print("\n=== Source-based Success/Failure Summary ===")
+    for source in all_sources:
+        succ, fail = source_to_success[source], source_to_failure[source]
+        total = len(succ) + len(fail)
+        if total == 0:
             continue
-        args = info.get("arguments", {})
-        if not args:
-            continue
-        focus = args.get("focus")
-        perc = args.get("harmful_percentage")
-        intervention = args.get("intervention_type")
-        source = info.get("source", "unknown")
-
-        stats[source][(focus, perc)][intervention] += 1
-        total_stats[(focus, perc)][intervention] += 1
-
-    # Print per source
-    for source, substats in stats.items():
+        rate = 100 * len(succ) / total
         print(f"\nSource: {source}")
-        for (focus, perc), interventions in sorted(substats.items()):
-            print(f"  {focus} - {perc}%:")
-            for intervention, count in sorted(interventions.items()):
-                print(f"    {intervention:<10}: {count}")
+        print(f"  Total puppets: {total}")
+        print(f"  Successful: {len(succ)}")
+        print(f"  Failed: {len(fail)}")
+        print(f"  Success rate: {rate:.1f}%")
 
-    # Print total
-    print("\nSource: TOTAL")
-    for (focus, perc), interventions in sorted(total_stats.items()):
-        print(f"  {focus} - {perc}%:")
-        for intervention, count in sorted(interventions.items()):
-            print(f"    {intervention:<10}: {count}")
+    total_succ = sum(len(v) for v in source_to_success.values())
+    total_fail = sum(len(v) for v in source_to_failure.values())
+    total_all = total_succ + total_fail
+    rate = 100 * total_succ / total_all if total_all else 0
+    print("\nTOTAL across all sources:")
+    print(f"  Total puppets: {total_all}")
+    print(f"  Successful: {total_succ}")
+    print(f"  Failed: {total_fail}")
+    print(f"  Success rate: {rate:.1f}%")
 
 
 def main():
@@ -611,11 +619,12 @@ Examples:
     
     # Main processing
     if args.stats_only:
-        result = stats_shell(args.directory, args.expected_rounds, args.output_prefix)
+        all_puppets, all_successful, all_failed = stats_shell(args.directory, args.expected_rounds, args.output_prefix)
         if args.puppet_args:
             collect_puppet_args(args.directory, args.args_dir)
             summarize_puppet_distribution(args.directory)
-            summarize_puppet_counts_by_source(args.directory)
+        
+        summarize_success_failure_by_source(args.directory, all_successful, all_failed)
     else:
         if args.combine:
             result = incremental_combine_files(
@@ -624,10 +633,7 @@ Examples:
                 args.output_dir,
                 args.success_list
             )
-            
-    if result is None:
-        sys.exit(1)
-
+    
 
 if __name__ == "__main__":
     main()
