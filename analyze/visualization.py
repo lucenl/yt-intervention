@@ -125,10 +125,10 @@ def visualize_harmful_exposure_trends(cache, combined, focus_filter):
 
 def visualize_cdf(cache, combined, focus_filter):
     """
-    Visualizes the CDF of harmful exposure (ratio of harmful videos per puppet) grouped by focus and harmful_percentage.
-    Each line in the plot corresponds to a different intervention type.
+    Visualizes the CDF of harmful exposure (ratio of harmful videos per puppet) grouped by intervention type.
+    Each subplot focuses on one intervention, with lines representing different harmful percentages (0%, 25%, 50%).
     """
-    grouped_ratios = defaultdict(lambda: defaultdict(list))  # (focus, percentage) -> intervention -> [harm_ratios]
+    grouped_ratios = defaultdict(list)  # (focus, intervention, percentage) -> [harm_ratios]
 
     for puppet_id, info in cache["processed_puppets"].items():
         if info.get("status") != "success":
@@ -150,40 +150,105 @@ def visualize_cdf(cache, combined, focus_filter):
         total = puppet_json.get("total", {})
         total_harm = total.get("num_harmful_videos", 0)
         total_recs = total.get("total_recommendations", 0)
+        if total_recs == 0:
+            continue
         harm_ratio = total_harm / total_recs
-        grouped_ratios[(focus, perc)][intervention].append(harm_ratio)
+        grouped_ratios[(focus, intervention, perc)].append(harm_ratio)
 
-    foci = sorted({k[0] for k in grouped_ratios})
-    percentages = sorted({k[1] for k in grouped_ratios})
-    interventions = sorted({i for d in grouped_ratios.values() for i in d})
+    # Determine minimum sample size across all conditions for balanced sampling
+    all_group_sizes = {k: len(v) for k, v in grouped_ratios.items()}
+    if all_group_sizes:
+        global_min_size = min(all_group_sizes.values())
+        print(f"[{focus_filter}] Balancing all conditions to {global_min_size} puppets per condition")
+    else:
+        global_min_size = 0
 
-    fig, axes = plt.subplots(1, len(foci), figsize=(6 * len(foci), 5), sharey=True)
+    # Balance sample sizes across conditions
+    balanced_ratios = {}
+    random.seed(42)
 
-    if len(foci) == 1:
-        axes = [axes]  # Make it iterable
+    for key, ratios in grouped_ratios.items():
+        if len(ratios) > global_min_size:
+            sampled_ratios = random.sample(ratios, global_min_size)
+        else:
+            sampled_ratios = ratios
+        balanced_ratios[key] = sampled_ratios
 
+    # Get unique values for organizing subplots (force intervention order)
+    foci = sorted({k[0] for k in balanced_ratios})
+    interventions = ["none", "replace", "downrank"]  # Force specific order
+    percentages = sorted({k[2] for k in balanced_ratios})
+
+    # Determine global x-axis range across all conditions
+    all_values = []
+    for key, values in balanced_ratios.items():
+        all_values.extend(values)
+    
+    if all_values:
+        global_x_min = min(all_values)
+        global_x_max = max(all_values)
+        # Add a small buffer to the max
+        x_range = (global_x_min, global_x_max * 1.05)
+    else:
+        x_range = (0, 1)
+
+    # Create subplots: rows for focus, columns for interventions
+    fig, axes = plt.subplots(len(foci), len(interventions), 
+                            figsize=(5 * len(interventions), 4 * len(foci)), 
+                            sharey=True)
+
+    # Handle single subplot cases
+    if len(foci) == 1 and len(interventions) == 1:
+        axes = np.array([[axes]])
+    elif len(foci) == 1:
+        axes = axes[np.newaxis, :]  # shape (1, N)
+    elif len(interventions) == 1:
+        axes = axes[:, np.newaxis]  # shape (N, 1)
+
+    # Color map for different percentages
+    colors = {0: 'blue', 25: 'orange', 50: 'red'}
+    
     for i, focus in enumerate(foci):
-        ax = axes[i]
-        for perc in percentages:
-            key = (focus, perc)
-            if key not in grouped_ratios:
-                continue
-            for intervention in interventions:
-                values = grouped_ratios[key].get(intervention)
+        for j, intervention in enumerate(interventions):
+            ax = axes[i][j]
+            
+            # Plot each percentage as a separate line
+            for perc in percentages:
+                key = (focus, intervention, perc)
+                values = balanced_ratios.get(key, [])
                 if not values:
                     continue
+                    
                 sorted_vals = np.sort(values)
-                yvals = np.arange(1, len(sorted_vals)+1) / len(sorted_vals)
-                ax.plot(sorted_vals, yvals, label=f"{intervention} ({perc}%)")
-        ax.set_title(f"{focus}")
-        ax.set_xlabel("Harmful Video Ratio per Puppet")
-        ax.set_ylabel("CDF")
-        ax.grid(True)
-        ax.legend()
+                yvals = np.linspace(0, 1, len(sorted_vals))
+                color = colors.get(perc, 'black')
+                ax.plot(sorted_vals, yvals, 
+                       label=f"{perc}% harmful (n={len(values)})", 
+                       color=color, linewidth=2)
+            
+            # Set subplot title and labels
+            if len(foci) > 1:
+                ax.set_title(f"{focus} - {intervention}")
+            else:
+                ax.set_title(f"{intervention}")
+            
+            if i == len(foci) - 1:  # Bottom row
+                ax.set_xlabel("Harmful Video Ratio per Puppet")
+            if j == 0:  # Left column
+                ax.set_ylabel("CDF")
+            
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            ax.set_xlim(x_range)
 
-    fig.suptitle("CDF of Harmful Exposure by Intervention", fontsize=14)
+    # Set overall title
+    if focus_filter == "both":
+        fig.suptitle("CDF of Harmful Exposure by Intervention Type", fontsize=16)
+    else:
+        fig.suptitle(f"CDF of Harmful Exposure by Intervention Type ({focus_filter})", fontsize=16)
+    
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(f"harmful_exposure_cdf_{focus_filter}.png", dpi=300)
+    plt.savefig(f"harmful_exposure_cdf_{focus_filter}.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 
