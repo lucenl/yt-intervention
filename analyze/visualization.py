@@ -147,14 +147,9 @@ def visualize_cdf(cache, combined, focus_filter):
         puppet_json = combined.get(puppet_id)
         if not puppet_json:
             continue
-        rounds = puppet_json.get("rounds", {})
-        total_harm = 0
-        total_recs = 0
-        for r in rounds.values():
-            total_harm += r.get("num_harmful_videos", 0)
-            total_recs += HOME_RECS if focus == "homepage" else UPNEXT_RECS
-        if total_recs == 0:
-            continue
+        total = puppet_json.get("total", {})
+        total_harm = total.get("num_harmful_videos", 0)
+        total_recs = total.get("total_recommendations", 0)
         harm_ratio = total_harm / total_recs
         grouped_ratios[(focus, perc)][intervention].append(harm_ratio)
 

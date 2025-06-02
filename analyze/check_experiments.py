@@ -15,6 +15,7 @@ import time
 from collections import defaultdict
 import hashlib
 from datetime import datetime
+from time import perf_counter
 
 
 class ProcessingTracker:
@@ -419,17 +420,18 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
     
     for puppet_id in puppet_ids:
         # Check cache first - much faster than filesystem check
-        if tracker.cache["processed_puppets"].get(puppet_id, {}).get("combined", False):
-            already_combined += 1
-        else:
-            # Double-check filesystem only if cache says not combined
-            combined_file = output_path / f"{puppet_id}.json"
+        # if tracker.cache["processed_puppets"].get(puppet_id, {}).get("combined", False):
+        #     already_combined += 1
+        # else:
+        #     # Double-check filesystem only if cache says not combined
+        #     combined_file = output_path / f"{puppet_id}.json"
            
-            if combined_file.exists():
-                already_combined += 1
-                tracker.mark_combined(puppet_id)  # Update cache to sync with reality
-            else:
-                puppets_to_combine.append(puppet_id)
+        #     if combined_file.exists():
+        #         already_combined += 1
+        #         tracker.mark_combined(puppet_id)  # Update cache to sync with reality
+        #     else:
+        #         puppets_to_combine.append(puppet_id)
+        puppets_to_combine.append(puppet_id)
     
     print(f"Found {already_combined} already combined puppets (skipping)")
     print(f"Need to combine {len(puppets_to_combine)} puppets")
@@ -442,7 +444,9 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
     # Simple combination loop
     successful_writes = 0
     
-    for puppet_id in puppets_to_combine:
+    for idx, puppet_id in enumerate(puppets_to_combine):
+        if idx % 100 == 0:
+            print(f"Combined {idx}/{len(puppets_to_combine)} ({puppet_id})")
         try:
             puppet_data = {
                 "puppet_id": puppet_id,
@@ -453,6 +457,10 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
             puppet_folder = base_path / puppet_id
             missing_files = 0
             
+            total_harmful = 0
+            total_recs = 0
+            total_cat = defaultdict(int)
+            
             valid = True
             # Read all round files
             for round_num in range(1, expected_rounds + 1):
@@ -462,6 +470,12 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
                         with open(round_file, 'r', encoding='utf-8') as f:
                             round_data = json.load(f)
                             puppet_data["rounds"][f"round_{round_num}"] = round_data
+                            
+                            total_harmful += round_data.get("num_harmful_videos", 0)
+                            total_recs += len(round_data.get("recommendations", 0))
+                            for cat, count in round_data.get("harm_category_counts", {}).items():
+                                total_cat[cat] += count
+                            
                     except json.JSONDecodeError as e:
                         print(f"JSONDecodeError: Skipping {round_file}: {e}")
                         missing_files += 1
@@ -477,6 +491,13 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
             if not valid:
                 print(f"Skipping {puppet_id}: Invalid data in rounds")
                 continue
+            
+            total_entry = {
+                "total_recommendations": total_recs,
+                "num_harmful_videos": total_harmful,
+                "harm_category_counts": dict(total_cat),
+            }
+            puppet_data["total"] = total_entry
             
             # Write combined file if we have data
             if len(puppet_data["rounds"]) > 0:
