@@ -273,7 +273,28 @@ def collect_puppet_args(base_dir, output_dir):
     # Only check puppets we know are successful and don't have metadata
     successful_puppets = tracker.get_successful_puppets()
     
+    # Map source dir to source name
+    SOURCE_MAP = {
+        "/media/data/lucen/codebase/yt-sock-puppet/output/puppets": "Lucen",
+        "/media/data/lucen/codebase/yt-sock-puppet/output/synced-puppets/puppets": "Haroon",
+        "/media/data/lucen/codebase/yt-sock-puppet/output/wv/puppets": "WV",
+    }
+    
+    puppet_ids_in_args_dir = {
+        f.stem for f in output_path.iterdir() if f.is_file() and f.suffix == ".json"
+    }
+
+    print(f"Found {len(puppet_ids_in_args_dir)} puppets in output directory: {output_path}")
+        
+    # Filter successful puppets to only those that have corresponding output directories
     for puppet_id in successful_puppets:
+        
+        if puppet_id in puppet_ids_in_args_dir:
+            # Add source to cache
+            source_dir = str(Path(output_dir).resolve())
+            source_name = SOURCE_MAP.get(source_dir) 
+            tracker.cache["processed_puppets"][puppet_id]["source"] = source_name
+
         # Skip if already has metadata
         puppet_info = tracker.cache["processed_puppets"].get(puppet_id, {})
         if puppet_info.get("arguments"):
@@ -487,6 +508,44 @@ def stats_shell(base_dir, expected_rounds, output_prefix="experiment_stats"):
     """
     return incremental_stats_analysis(base_dir, expected_rounds, output_prefix, use_shell=True)
 
+    
+def summarize_puppet_counts_by_source(base_dir):
+    from collections import defaultdict
+    tracker = ProcessingTracker(base_dir)
+    cache = tracker._load_cache()
+    
+    stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    total_stats = defaultdict(lambda: defaultdict(int))
+
+    for puppet_id, info in cache["processed_puppets"].items():
+        if info.get("status") != "success":
+            continue
+        args = info.get("arguments", {})
+        if not args:
+            continue
+        focus = args.get("focus")
+        perc = args.get("harmful_percentage")
+        intervention = args.get("intervention_type")
+        source = info.get("source", "unknown")
+
+        stats[source][(focus, perc)][intervention] += 1
+        total_stats[(focus, perc)][intervention] += 1
+
+    # Print per source
+    for source, substats in stats.items():
+        print(f"\nSource: {source}")
+        for (focus, perc), interventions in sorted(substats.items()):
+            print(f"  {focus} - {perc}%:")
+            for intervention, count in sorted(interventions.items()):
+                print(f"    {intervention:<10}: {count}")
+
+    # Print total
+    print("\nSource: TOTAL")
+    for (focus, perc), interventions in sorted(total_stats.items()):
+        print(f"  {focus} - {perc}%:")
+        for intervention, count in sorted(interventions.items()):
+            print(f"    {intervention:<10}: {count}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -556,6 +615,7 @@ Examples:
         if args.puppet_args:
             collect_puppet_args(args.directory, args.args_dir)
             summarize_puppet_distribution(args.directory)
+            summarize_puppet_counts_by_source(args.directory)
     else:
         if args.combine:
             result = incremental_combine_files(
