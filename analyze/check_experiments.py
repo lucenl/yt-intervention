@@ -148,29 +148,27 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
         # Get puppets that haven't been processed yet
         unprocessed_puppets = tracker.get_unprocessed_puppets(all_puppets, expected_rounds)
         
+        # Get existing successful and failed puppets from cache
+        all_successful = tracker.get_successful_puppets()
+        all_failed = tracker.get_failed_puppets()
+        
         if not unprocessed_puppets:
             # No new puppets, just report existing stats
-            successful_puppets = tracker.get_successful_puppets()
-            failed_puppets = tracker.get_failed_puppets()
-            
             # **MODIFIED**: Update text files as snapshots even when no new processing
-            success_file = f"{output_prefix}_successful.txt"
-            failed_file = f"{output_prefix}_failed.txt"
-            
             with open(success_file, 'w', encoding='utf-8') as f:
-                for puppet_id in sorted(successful_puppets):
+                for puppet_id in sorted(all_successful):
                     f.write(f"{puppet_id}\n")
             
             with open(failed_file, 'w', encoding='utf-8') as f:
-                for puppet_id in sorted(failed_puppets):
+                for puppet_id in sorted(all_failed):
                     f.write(f"{puppet_id}\n")
             
             print(f"No new puppets to process. Current stats:")
             print(f"Total puppets: {len(all_puppets)}")
-            print(f"Successful: {len(successful_puppets)}")
-            print(f"Failed: {len(failed_puppets)}")
+            print(f"Successful: {len(all_successful)}")
+            print(f"Failed: {len(all_failed)}")
             if len(all_puppets) > 0:
-                print(f"Success rate: {len(successful_puppets)/len(all_puppets)*100:.1f}%")
+                print(f"Success rate: {len(all_successful)/len(all_puppets)*100:.1f}%")
             
             print(f"Text files updated as snapshots:")
             print(f"  Successful puppets: {success_file}")
@@ -213,6 +211,19 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
                     # Fall back to Python method if shell fails
                     use_shell = False
         
+        # If shell method failed or wasn't used, use Python method
+        if not use_shell:
+            for puppet_id in unprocessed_puppets:
+                puppet_dir = Path(base_dir) / puppet_id
+                final_round_file = puppet_dir / f"round_{expected_rounds}.json"
+                
+                if final_round_file.exists():
+                    new_successful.append(puppet_id)
+                    tracker.update_puppet_status(puppet_id, True)
+                else:
+                    new_failed.append(puppet_id)
+                    tracker.update_puppet_status(puppet_id, False)
+        
         # Get all successful and failed puppets (old + new)
         all_successful = tracker.get_successful_puppets()
         all_failed = tracker.get_failed_puppets()
@@ -225,7 +236,6 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
         with open(failed_file, 'w', encoding='utf-8') as f:
             for puppet_id in sorted(all_failed):
                 f.write(f"{puppet_id}\n")
-        
         
         # Save cache
         tracker.update_stats_timestamp()
@@ -252,7 +262,7 @@ def incremental_stats_analysis(base_dir, expected_rounds, output_prefix="experim
         
     except Exception as e:
         print(f"Error in incremental stats: {e}")
-        return None
+        return None, None, None  # Return three None values instead of just None
 
 def collect_puppet_args(base_dir, output_dir):
     """
@@ -420,18 +430,17 @@ def incremental_combine_files(base_dir, expected_rounds, output_dir, success_lis
     
     for puppet_id in puppet_ids:
         # Check cache first - much faster than filesystem check
-        # if tracker.cache["processed_puppets"].get(puppet_id, {}).get("combined", False):
-        #     already_combined += 1
-        # else:
-        #     # Double-check filesystem only if cache says not combined
-        #     combined_file = output_path / f"{puppet_id}.json"
+        if tracker.cache["processed_puppets"].get(puppet_id, {}).get("combined", False):
+            already_combined += 1
+        else:
+            # Double-check filesystem only if cache says not combined
+            combined_file = output_path / f"{puppet_id}.json"
            
-        #     if combined_file.exists():
-        #         already_combined += 1
-        #         tracker.mark_combined(puppet_id)  # Update cache to sync with reality
-        #     else:
-        #         puppets_to_combine.append(puppet_id)
-        puppets_to_combine.append(puppet_id)
+            if combined_file.exists():
+                already_combined += 1
+                tracker.mark_combined(puppet_id)  # Update cache to sync with reality
+            else:
+                puppets_to_combine.append(puppet_id)
     
     print(f"Found {already_combined} already combined puppets (skipping)")
     print(f"Need to combine {len(puppets_to_combine)} puppets")
