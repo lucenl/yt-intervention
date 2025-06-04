@@ -137,8 +137,10 @@ def intervention(puppet, args):
                 continue
             if response.status_code == 200:
                 break
+            elif response.status_code == 202:
+                time.sleep(2)
             else:
-                logging.error(f"Failed to start preprocess for round {round_num}: {response.text}")
+                logging.error(f"Failed to start preprocessing for round {round_num}: {response.text}")
                 logging.info(f"Retrying in 2 seconds...")
                 time.sleep(2)
         logging.info(f"Start preprocess took {perf_counter() - start:.2f} seconds")
@@ -167,11 +169,10 @@ def intervention(puppet, args):
                     break
                 logging.info(f"Received next video {next_video} for round {round_num}")
                 break
-            elif response.status_code == 500:
-                logging.error(f"Preprocessing failed for round {round_num}: {response.text}")
-                return 
+            elif response.status_code == 202:
+                time.sleep(2)
             else:
-                logging.error(f"Failed to get recommendations for round {round_num}: {response.text}")
+                logging.error(f"Failed to get recommendation in preprocess for round {round_num}: {response.text}")
                 logging.info(f"Retrying in 2 seconds...")
                 time.sleep(2)
             logging.info(f"Waiting for preprocessing to complete for round {round_num}")
@@ -207,6 +208,8 @@ def intervention(puppet, args):
             elif response.status_code == 500:
                 logging.error(f"Round {round_num} completion not acknowledged: {response.text}")
                 return
+            elif response.status_code == 202:
+                time.sleep(2)
             else:
                 logging.error(f"Failed to signal preprocessing completion for round {round_num}: {response.text}")
                 logging.info(f"Retrying in 2 seconds...")

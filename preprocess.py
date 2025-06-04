@@ -6,7 +6,6 @@ import random
 from metadata_extractor import MetadataExtractor
 # from roberta_classifier import RoBERTaClassifier, MulticlassClassifier
 import pandas as pd
-import multiprocessing as mp
 import requests
 
 # Logging setup at module level
