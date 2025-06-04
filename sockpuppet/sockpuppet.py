@@ -120,21 +120,27 @@ def intervention(puppet, args):
 
         # Start preprocessing for this round
         start = perf_counter()
-        try:
-            logging.info(f"Intervention(): Starting preprocessing for round {round_num}")
-            response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
-                "puppet_id": puppet["puppetId"],
-                "round_num": round_num,
-                "intervention_type": intervention_type,
-                "focus": focus
-            })
-            logging.info(f"Intervention(): requests for preprocess")
-        except Exception as e:
-            logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
-            return
-        if response.status_code != 200:
-            logging.error(f"Failed to start preprocess for round {round_num}: {response.text}")
-            break
+        while True:
+            try:
+                logging.info(f"Intervention(): Starting preprocessing for round {round_num}")
+                response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
+                    "puppet_id": puppet["puppetId"],
+                    "round_num": round_num,
+                    "intervention_type": intervention_type,
+                    "focus": focus
+                })
+                logging.info(f"Intervention(): requests for preprocess")
+            except Exception as e:
+                logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+                logging.info(f"Retrying in 5 seconds...")
+                time.sleep(5)
+                continue
+            if response.status_code == 200:
+                break
+            else:
+                logging.error(f"Failed to start preprocess for round {round_num}: {response.text}")
+                logging.info(f"Retrying in 2 seconds...")
+                time.sleep(2)
         logging.info(f"Start preprocess took {perf_counter() - start:.2f} seconds")
         
         # Wait for preprocessing to complete and get recommendations
@@ -150,7 +156,9 @@ def intervention(puppet, args):
                 logging.info(f"Intervention(): request recommendations for round {round_num}")
             except Exception as e:
                 logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
-                return
+                time.sleep(5)
+                logging.info(f"Retrying in 5 seconds...")
+                continue
             if response.status_code == 200:
                 data = response.json()
                 next_video = data.get("next_video")
@@ -162,9 +170,14 @@ def intervention(puppet, args):
             elif response.status_code == 500:
                 logging.error(f"Preprocessing failed for round {round_num}: {response.text}")
                 return 
+            else:
+                logging.error(f"Failed to get recommendations for round {round_num}: {response.text}")
+                logging.info(f"Retrying in 2 seconds...")
+                time.sleep(2)
             logging.info(f"Waiting for preprocessing to complete for round {round_num}")
             time.sleep(2)
-        logging.info(f"Waiting for preprocessing to complete for round {round_num}")
+            
+        logging.info(f"Get recommendations took {perf_counter() - start:.2f} seconds")
 
         # Watch the video
         start = perf_counter()
@@ -177,14 +190,28 @@ def intervention(puppet, args):
         # Signal round completion
         start = perf_counter()
         logging.info(f"Intervention():Signaling completion for round {round_num}")
-        response = requests.post(f"{MONITOR_URL}/complete_round", json={
-            "puppet_id": puppet["puppetId"],
-            "round_num": round_num
-        })
-        logging.info(f"Intervention(): requests for complete round")
-        if response.status_code != 200:
-            logging.warning(f"Round {round_num} completion not acknowledged: {response.text}")
-        logging.info(f"Signaled completion for round {round_num}")
+        while True:
+            try:
+                response = requests.post(f"{MONITOR_URL}/complete_round", json={
+                    "puppet_id": puppet["puppetId"],
+                    "round_num": round_num
+                })
+                logging.info(f"Intervention(): requests for complete round")
+            except Exception as e:
+                logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+                time.sleep(5)
+                logging.info(f"Retrying in 5 seconds...")
+                continue
+            if response.status_code == 200:
+                break
+            elif response.status_code == 500:
+                logging.error(f"Round {round_num} completion not acknowledged: {response.text}")
+                return
+            else:
+                logging.error(f"Failed to signal preprocessing completion for round {round_num}: {response.text}")
+                logging.info(f"Retrying in 2 seconds...")
+                time.sleep(2)   
+            logging.info(f"Signaled completion for round {round_num}")
 
         logging.info(f"Round {round_num} cleanup completed in {perf_counter() - start:.2f} seconds")
         add_action(puppet, f"round_{round_num}_end")
