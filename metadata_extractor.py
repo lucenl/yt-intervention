@@ -68,7 +68,7 @@ class MetadataExtractor:
         results = []
         for item in items:
             vid = item.get('id')
-            logging.info("vid: ", vid)
+            # logging.info("vid: ", vid)
             snippet = item.get('snippet', {})
             data = {
                 'video_id': vid,
@@ -153,8 +153,8 @@ class MetadataExtractor:
                 if vid:
                     self.cache.hset('metadata', vid, json.dumps(item))
                     added += 1
-            logger.info(f"POST /metadata added {len(added)} items")
-            logger.info(f"Updated length of post_metadata: {len(self.cache.hset('metadata', vid, json.dumps(item)))}")
+            logging.info(f"POST /metadata added {len(added)} items")
+            logging.info(f"Updated length of post_metadata: {len(self.cache.hset('metadata', vid, json.dumps(item)))}")
             return jsonify({'status': 'ok', 'added': added})
 
     @staticmethod

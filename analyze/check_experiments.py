@@ -285,39 +285,77 @@ def collect_puppet_args(base_dir, output_dir):
     successful_puppets = tracker.get_successful_puppets()
     failed_puppets = tracker.get_failed_puppets()
     
+    print(f"DEBUG: Total successful puppets in cache: {len(successful_puppets)}")
+    print(f"DEBUG: Total failed puppets in cache: {len(failed_puppets)}")
+    
     # Map source dir to source name
     SOURCE_MAP = {
         "/media/data/lucen/codebase/yt-sock-puppet/output/puppets": "Lucen",
         "/media/data/lucen/codebase/yt-sock-puppet/output/synced-puppets/puppets": "Haroon",
         "/media/data/lucen/codebase/yt-sock-puppet/output/wv/puppets": "WV",
     }
-  
-    puppet_id_to_source = {}
+    
+    # **FIXED**: Only process the current output_dir, not all SOURCE_MAP directories
+    current_source = None
+    output_dir_resolved = str(Path(output_dir).resolve())
+    
+    # Find which source this output_dir corresponds to
     for src_dir, source_name in SOURCE_MAP.items():
-        path = Path(src_dir).resolve()
-        num_puppets = 0
-        for file in path.glob("*.json"):
-            puppet_id = file.stem
-            puppet_id_to_source[puppet_id] = source_name
-            num_puppets += 1
+        if str(Path(src_dir).resolve()) == output_dir_resolved:
+            current_source = source_name
+            break
+    
+    if not current_source:
+        print(f"Warning: {output_dir} not found in SOURCE_MAP, using 'Unknown'")
+        current_source = "Unknown"
+    
+    print(f"Processing {output_dir} as source: {current_source}")
+    
+    # Only scan the current output directory
+    puppet_id_to_source = {}
+    num_puppets = 0
+    for file in output_path.glob("*.json"):
+        puppet_id = file.stem
+        puppet_id_to_source[puppet_id] = current_source
+        num_puppets += 1
 
-        print(f"Found {num_puppets} puppets in output directory: {src_dir}")
-        
+    print(f"Found {num_puppets} puppets in output directory: {output_dir}")
+    print(f"DEBUG: Total puppet_id_to_source mappings: {len(puppet_id_to_source)}")
+    
+    # Count different categories for debugging
+    source_updates = 0
+    already_has_metadata = 0
+    not_in_cache = 0
+    files_processed = 0
+    source_updates_detail = []
+    
     for puppet_id in successful_puppets + failed_puppets:
-
         source_name = puppet_id_to_source.get(puppet_id)
         if source_name:
-            tracker.cache["processed_puppets"].setdefault(puppet_id, {})["source"] = source_name
-
+            # **FIXED**: Ensure the puppet entry exists before setting source
+            if puppet_id not in tracker.cache["processed_puppets"]:
+                print(f"ERROR: {puppet_id} not found in cache but should be there!")
+                continue
+                
+            old_source = tracker.cache["processed_puppets"][puppet_id].get("source", "Unknown")
+            tracker.cache["processed_puppets"][puppet_id]["source"] = source_name
+            
+            if old_source != source_name:
+                source_updates += 1
+                source_updates_detail.append(f"{puppet_id}: {old_source} -> {source_name}")
+                if len(source_updates_detail) <= 5:  # Show first 5 examples
+                    print(f"DEBUG: Updated {puppet_id}: {old_source} -> {source_name}")
 
         # Skip if already has metadata
         puppet_info = tracker.cache["processed_puppets"].get(puppet_id, {})
         if puppet_info.get("arguments"):
+            already_has_metadata += 1
             continue
             
         # Look for puppet's output file
         puppet_output_file = output_path / f"{puppet_id}.json"
         if puppet_output_file.exists():
+            files_processed += 1
             try:
                 with open(puppet_output_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -341,7 +379,18 @@ def collect_puppet_args(base_dir, output_dir):
             except Exception as e:
                 print(f"Error reading arguments for {puppet_id}: {e}")
     
+    # Debug summary
+    print(f"DEBUG: Source updates made: {source_updates}")
+    if source_updates > 5:
+        print(f"DEBUG: ... and {source_updates - 5} more source updates")
+    print(f"DEBUG: Puppets already having metadata: {already_has_metadata}")
+    print(f"DEBUG: Puppet files found in current output dir: {files_processed}")
+    print(f"DEBUG: New metadata collected: {processed_count}")
+    
+    # **CRITICAL**: Make sure to save the cache!
+    print("DEBUG: Saving cache...")
     tracker.save_cache()
+    print("DEBUG: Cache saved successfully")
     
     end_time = time.time()
     print(f"Collected metadata for {processed_count} puppets in {end_time - start_time:.2f} seconds")
