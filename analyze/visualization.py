@@ -74,10 +74,24 @@ def extract_harm_ratios_by_round(cache, combined, focus_filter, target_rounds=[1
                 total_harm = total.get("num_harmful_videos", 0)
                 total_recs = total.get("total_recommendations", 0)
             else:
-                # Use specific round data
-                round_data = puppet_json.get("rounds", {}).get(f"round_{round_num}", {})
+                # Use calculate data from round 1 to round_num
+                # cumulative_harm = 0
+                # cumulative_recs = 0
+                
+                # rounds_data = puppet_json.get("rounds", {})
+                # for r in range(1, round_num + 1):
+                #     round_data = rounds_data.get(f"round_{r}", {})
+                #     cumulative_harm += round_data.get("num_harmful_videos", 0)
+                #     cumulative_recs += len(round_data.get("recommendations", []))
+                
+                # total_harm = cumulative_harm
+                # total_recs = cumulative_recs
+                
+                rounds_data = puppet_json.get("rounds", {})
+                round_data = rounds_data.get(f"round_{round_num}", {})
                 total_harm = round_data.get("num_harmful_videos", 0)
                 total_recs = len(round_data.get("recommendations", []))
+                
             
             if total_recs == 0:
                 continue
@@ -85,7 +99,29 @@ def extract_harm_ratios_by_round(cache, combined, focus_filter, target_rounds=[1
             harm_ratio = total_harm / total_recs
             grouped_data[intervention][perc][round_num].append(harm_ratio)
     
-    return grouped_data
+    all_group_sizes = {}
+    for intervention in grouped_data:
+        for perc in grouped_data[intervention]:
+            for round_num in grouped_data[intervention][perc]:
+                key = (intervention, perc, round_num)
+                all_group_sizes[key] = len(grouped_data[intervention][perc][round_num])
+    
+    if all_group_sizes:
+        global_min_size = min(all_group_sizes.values())
+        print(f"[{focus_filter}] Balancing all conditions to {global_min_size} puppets per condition")
+        
+        # Apply balanced sampling
+        import random
+        random.seed(42)
+        
+        for intervention in grouped_data:
+            for perc in grouped_data[intervention]:
+                for round_num in grouped_data[intervention][perc]:
+                    data = grouped_data[intervention][perc][round_num]
+                    if len(data) > global_min_size:
+                        grouped_data[intervention][perc][round_num] = random.sample(data, global_min_size)
+    
+    return grouped_data, global_min_size
 
 def visualize_pre_post_intervention_cdf(cache, combined, focus_filter):
     """
@@ -93,7 +129,7 @@ def visualize_pre_post_intervention_cdf(cache, combined, focus_filter):
     with statistical significance tests
     """
     # Extract data for rounds 1 and 30
-    grouped_data = extract_harm_ratios_by_round(cache, combined, focus_filter, [1, 30])
+    grouped_data, balanced_size = extract_harm_ratios_by_round(cache, combined, focus_filter, [1, 30])
     
     # Get unique interventions and percentages
     interventions = ["none", "replace", "downrank"]
@@ -124,6 +160,9 @@ def visualize_pre_post_intervention_cdf(cache, combined, focus_filter):
         x_range = (min(all_values), max(all_values) * 1.05)
     else:
         x_range = (0, 1)
+        
+    legend_elements = []
+    legend_added = False
     
     for i, intervention in enumerate(interventions):
         for j, perc in enumerate(percentages):
@@ -137,14 +176,21 @@ def visualize_pre_post_intervention_cdf(cache, combined, focus_filter):
             if round_1_data:
                 sorted_vals = np.sort(round_1_data)
                 yvals = np.linspace(0, 1, len(sorted_vals))
-                ax.plot(sorted_vals, yvals, 'b-', linewidth=2, 
-                       label=f'Pre (Round 1, n={len(round_1_data)})')
+                line1 = ax.plot(sorted_vals, yvals, 'b-', linewidth=2, 
+                       label=f'Pre (Round 1, n={len(round_1_data)})')[0]
+                if not legend_added:
+                    legend_elements.append(line1)
             
             if round_30_data:
                 sorted_vals = np.sort(round_30_data)
                 yvals = np.linspace(0, 1, len(sorted_vals))
-                ax.plot(sorted_vals, yvals, 'r-', linewidth=2, 
-                       label=f'Post (Round 30, n={len(round_30_data)})')
+                line2 = ax.plot(sorted_vals, yvals, 'r-', linewidth=2, 
+                       label=f'Post (Round 30, n={len(round_30_data)})')[0]
+                if not legend_added:
+                    legend_elements.append(line2)
+            
+            if not legend_added:
+                legend_added = True
             
             # Statistical test
             ks_result = ks_test(round_1_data, round_30_data)
@@ -158,12 +204,17 @@ def visualize_pre_post_intervention_cdf(cache, combined, focus_filter):
                 ax.set_ylabel("CDF")
             
             ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=8)
             ax.set_xlim(x_range)
     
-    title = f"Pre vs Post Intervention CDF Comparison ({focus_filter})" if focus_filter != "both" else "Pre vs Post Intervention CDF Comparison"
+    title = f"Pre vs Post Intervention CDF Comparison ({focus_filter}, n={balanced_size})" if focus_filter != "both" else "Pre vs Post Intervention CDF Comparison"
     fig.suptitle(title, fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+
+    if legend_elements:
+        fig.legend(legend_elements, [f'Pre (Round 1)', f'Post (Round 30)'], 
+                  loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=2)
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  
     plt.savefig(f"pre_post_intervention_cdf_{focus_filter}.png", dpi=300, bbox_inches='tight')
     plt.show()
 
@@ -173,7 +224,7 @@ def visualize_multi_round_cdf(cache, combined, focus_filter):
     """
     # Extract data for multiple rounds
     target_rounds = [1, 5, 15, 30]
-    grouped_data = extract_harm_ratios_by_round(cache, combined, focus_filter, target_rounds)
+    grouped_data, balanced_size = extract_harm_ratios_by_round(cache, combined, focus_filter, target_rounds)
     
     # Get unique interventions and percentages
     interventions = ["none", "replace", "downrank"]
@@ -209,6 +260,10 @@ def visualize_multi_round_cdf(cache, combined, focus_filter):
     colors = ['blue', 'green', 'orange', 'red']
     round_colors = dict(zip(target_rounds, colors))
     
+    legend_elements = []
+    legend_labels = []
+    legend_added = False
+    
     for i, intervention in enumerate(interventions):
         for j, perc in enumerate(percentages):
             ax = axes[i][j]
@@ -219,8 +274,15 @@ def visualize_multi_round_cdf(cache, combined, focus_filter):
                 if round_data:
                     sorted_vals = np.sort(round_data)
                     yvals = np.linspace(0, 1, len(sorted_vals))
-                    ax.plot(sorted_vals, yvals, color=round_colors[round_num], 
-                           linewidth=2, label=f'Round {round_num} (n={len(round_data)})')
+                    line = ax.plot(sorted_vals, yvals, color=round_colors[round_num], 
+                           linewidth=2, label=f'Round {round_num} (n={len(round_data)})')[0]
+                    
+                    if not legend_added:
+                        legend_elements.append(line)
+                        legend_labels.append(f'Round {round_num}')
+            
+            if not legend_added:
+                legend_added = True
             
             # Statistical tests between consecutive rounds
             ks_results = []
@@ -242,12 +304,16 @@ def visualize_multi_round_cdf(cache, combined, focus_filter):
                 ax.set_ylabel("CDF")
             
             ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=7)
             ax.set_xlim(x_range)
     
-    title = f"Multi-Round CDF Evolution ({focus_filter})" if focus_filter != "both" else "Multi-Round CDF Evolution"
+    title = f"Multi-Round CDF Evolution ({focus_filter}, n={balanced_size})" if focus_filter != "both" else "Multi-Round CDF Evolution"
     fig.suptitle(title, fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    if legend_elements:
+        fig.legend(legend_elements, legend_labels, 
+                  loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=len(target_rounds))
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95]) 
     plt.savefig(f"multi_round_cdf_{focus_filter}.png", dpi=300, bbox_inches='tight')
     plt.show()
     
@@ -324,7 +390,10 @@ def visualize_harmful_exposure_trends(cache, combined, focus_filter):
     elif len(percentages) == 1:
         axes = axes[:, np.newaxis]  # shape (N, 1)
 
-
+    legend_elements = []
+    legend_labels = []
+    legend_added = False
+    
     for i, focus in enumerate(foci):
         for j, perc in enumerate(percentages):
             ax = axes[i][j]
@@ -332,17 +401,30 @@ def visualize_harmful_exposure_trends(cache, combined, focus_filter):
             if key in averaged_trends:
                 for intervention in interventions:
                     if intervention in averaged_trends[key]:
-                        ax.plot(range(1, max_rounds + 1), averaged_trends[key][intervention], label=f"intervention (n={global_min_size})")
+                        line = ax.plot(range(1, max_rounds + 1), averaged_trends[key][intervention])[0]
+                        
+                        if not legend_added:
+                            legend_elements.append(line)
+                            legend_labels.append(f"{intervention} (n={global_min_size})")
+                
+                if not legend_added:
+                    legend_added = True
+            
             ax.set_title(f"{focus} - {perc}%")
             if i == len(foci) - 1:
                 ax.set_xlabel("Round")
             if j == 0:
                 ax.set_ylabel("Avg # Harmful Videos")
             ax.grid(True)
-            ax.legend()
 
-    fig.suptitle("Harmful Exposure Trends", fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    title = f"Harmful Exposure Trends ({focus_filter}, n={global_min_size})" if focus_filter != "both" else "Harmful Exposure Trends"
+    fig.suptitle(title, fontsize=14)
+
+    if legend_elements:
+        fig.legend(legend_elements, legend_labels, 
+                  loc='lower center', bbox_to_anchor=(0.5, 0), ncol=len(interventions))
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.90]) 
     plt.savefig(f"harmful_exposure_trends_{focus_filter}.png", dpi=300)
     plt.show()
 
@@ -552,6 +634,10 @@ def visualize_cdf_by_percentage(cache, combined, focus_filter):
     elif len(percentages) == 1:
         axes = axes[:, np.newaxis]  # shape (N, 1)
 
+    legend_elements = []
+    legend_labels = []
+    legend_added = False
+
     for i, focus in enumerate(foci):
         for j, perc in enumerate(percentages):
             ax = axes[i][j]
@@ -565,9 +651,14 @@ def visualize_cdf_by_percentage(cache, combined, focus_filter):
                     
                 sorted_vals = np.sort(values)
                 yvals = np.linspace(0, 1, len(sorted_vals))
-                ax.plot(sorted_vals, yvals, 
-                       label=f"{intervention} (n={len(values)})", 
-                       linewidth=2)
+                line = ax.plot(sorted_vals, yvals, linewidth=2)[0]
+               
+                if not legend_added:
+                    legend_elements.append(line)
+                    legend_labels.append(f"{intervention} (n={global_min_size})")
+            
+            if not legend_added:
+                legend_added = True
             
             # Set subplot title and labels
             if len(foci) > 1:
@@ -581,20 +672,22 @@ def visualize_cdf_by_percentage(cache, combined, focus_filter):
                 ax.set_ylabel("CDF")
             
             ax.grid(True, alpha=0.3)
-            ax.legend()
             ax.set_xlim(x_range)
 
-    # Set overall title
     if focus_filter == "both":
-        fig.suptitle("CDF of Harmful Exposure by Harmful Percentage", fontsize=16)
+        title = "CDF of Harmful Exposure by Harmful Percentage (n={global_min_size})"
     else:
-        fig.suptitle(f"CDF of Harmful Exposure by Harmful Percentage ({focus_filter})", fontsize=16)
+        title = f"CDF of Harmful Exposure by Harmful Percentage ({focus_filter}, n={global_min_size})"
+    fig.suptitle(title, fontsize=16)
     
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    if legend_elements:
+        fig.legend(legend_elements, legend_labels, 
+                  loc='lower center', bbox_to_anchor=(0.5, 0), ncol=len(interventions))
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.90])  
     plt.savefig(f"harmful_exposure_cdf_by_percentage_{focus_filter}.png", dpi=300, bbox_inches='tight')
     plt.show()
-
-
+    
 def main(plot_type, focus_filter):
     cache = load_cache(cache_path)
     combined = load_combined_puppets(combined_dir)

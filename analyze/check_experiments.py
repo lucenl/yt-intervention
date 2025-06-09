@@ -387,7 +387,6 @@ def collect_puppet_args(base_dir, output_dir):
     print(f"DEBUG: Puppet files found in current output dir: {files_processed}")
     print(f"DEBUG: New metadata collected: {processed_count}")
     
-    # **CRITICAL**: Make sure to save the cache!
     print("DEBUG: Saving cache...")
     tracker.save_cache()
     print("DEBUG: Cache saved successfully")
@@ -682,7 +681,7 @@ Examples:
             print("No cache file found.")
     
     if args.show_cache:
-        tracker = ProcessingTracker(args.directory)
+        tracker = ProcessingTracker(args.directory) 
         successful = tracker.get_successful_puppets()
         failed = tracker.get_failed_puppets()
         uncombined = tracker.get_uncombined_successful_puppets()
