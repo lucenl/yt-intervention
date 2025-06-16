@@ -199,8 +199,8 @@ def intervention(puppet, args):
                 logging.error(f"Failed to get recommendation in preprocess for round {round_num}: {response.text}")
                 logging.info(f"Retrying in 60 seconds...")
                 time.sleep(60)
-            logging.info(f"Waiting for preprocessing to complete for round {round_num}")
-            time.sleep(60)
+            # logging.info(f"Waiting for preprocessing to complete for round {round_num}")
+            # time.sleep(60)
             
         logging.info(f"Get recommendations took {perf_counter() - start:.2f} seconds")
 
