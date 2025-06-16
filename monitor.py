@@ -109,5 +109,22 @@ def complete_round():
     logger.info("complete_round(): Complete complete_round request")
     return jsonify({"status": "error", "message": "Process not found"}), 404
 
+@app.route('/initialize_round', methods=['POST'])
+def initialize_round():
+    logger.info("initialize_round(): Received initialize_round request")
+    data = request.get_json()
+    puppet_id = data.get('puppet_id')
+    round_num = data.get('round_num')
+    recs = data.get('recommendations', [])
+    puppet_shared_dir = os.path.join(SHARED_DIR, puppet_id)
+
+    if not os.path.exists(puppet_shared_dir):
+        os.makedirs(puppet_shared_dir)
+
+    with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "w") as f:
+        f.write("\n".join(recs))
+
+    return jsonify({"status": "success", "message": f"Round {round_num} initialized for {puppet_id}"}), 200
+
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=False)

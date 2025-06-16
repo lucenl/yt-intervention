@@ -8,12 +8,30 @@ import random
 import argparse
 from scipy.stats import ks_2samp
 import string
+import pickle
+import pandas as pd  
 
 combined_dir = "./combined_puppets"
 cache_path = ".processing_cache.json"
 max_rounds = 30
 HOME_RECS = 25
 UPNEXT_RECS = 12
+
+
+def load_plot_data(data_path="plot_data_arrays.pkl"):
+    """
+    Load pre-processed plot data
+    """
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Plot data file {data_path} not found. Run with --extract-data first.")
+    
+    with open(data_path, 'rb') as f:
+        plot_data = pickle.load(f)
+    
+    print(f"Loaded plot data created at: {plot_data['metadata']['created_at']}")
+    print(f"Balance info: {plot_data['balance_info']}")
+    
+    return plot_data
 
 def load_cache(cache_path):
     with open(cache_path, "r", encoding="utf-8") as f:
@@ -39,7 +57,7 @@ def ks_test(d1, d2):
     significance = '**' if test.pvalue < 0.01 else '*' if test.pvalue < 0.05 else ''
     ks_stat = f'{test.statistic:.3f}{significance}'
     # p_val = f'{test.pvalue}'
-    return ks_stat
+    return ks_stat, test.pvalue
 
 def extract_harm_ratios_by_round(cache, combined, focus_filter, target_rounds=[1, 5, 15, 30], all_balanced=False):
     """
@@ -1021,6 +1039,7 @@ def visualize_cdf_by_percentage(cache, combined, focus_filter):
     
     return ks_results
     
+
 def generate_ks_comparison_table(ks_results, focus_filter):
     """
     Generate a comprehensive KS comparison table and save to CSV
@@ -1036,14 +1055,14 @@ def generate_ks_comparison_table(ks_results, focus_filter):
     ks_df = ks_df.sort_values(['Focus', 'Harmful_Percentage', 'Comparison'])
     
     # Save to CSV
-    output_filename = f"ks_comparison_table_{focus_filter}.csv"
+    output_filename = f"enhanced_ks_comparison_table_{focus_filter}.csv"
     ks_df.to_csv(output_filename, index=False)
     print(f"KS comparison table saved to {output_filename}")
     
     # Also create a formatted version for easy reading
-    formatted_output = f"ks_comparison_formatted_{focus_filter}.txt"
+    formatted_output = f"enhanced_ks_comparison_formatted_{focus_filter}.txt"
     with open(formatted_output, 'w') as f:
-        f.write("KS Test Comparison Results\n")
+        f.write("Enhanced KS Test Comparison Results\n")
         f.write("=" * 50 + "\n\n")
         
         # Group by focus and percentage
@@ -1065,7 +1084,7 @@ def generate_ks_comparison_table(ks_results, focus_filter):
     print(f"Formatted KS comparison saved to {formatted_output}")
     
     # Print summary to console
-    print("\n=== KS Test Summary ===")
+    print("\n=== Enhanced KS Test Summary ===")
     for focus in sorted(ks_df['Focus'].unique()):
         print(f"\n{focus}:")
         focus_data = ks_df[ks_df['Focus'] == focus]
@@ -1079,9 +1098,9 @@ def generate_ks_comparison_table(ks_results, focus_filter):
     return ks_df
  
     
-def main(plot_type, focus_filter):
+def main(data_path, plot_type, focus_filter):
     cache = load_cache(cache_path)
-    combined = load_combined_puppets(combined_dir)
+    combined = load_combined_puppets(combined_dir)    
     if plot_type == "pre_post":
         visualize_pre_post_intervention_cdf(cache, combined, focus_filter)
     elif plot_type == "multi_round":
@@ -1099,6 +1118,10 @@ def main(plot_type, focus_filter):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data-path", default="plot_data_arrays.pkl",
+        help="Path to the pkl file with plot data"
+    )
+    parser.add_argument(
         "--focus-filter", choices=["homepage", "upnext", "both"], default="both",
         help="Which focus group(s) to include: homepage, upnext, or both"
     )
@@ -1108,4 +1131,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    main(args.plot_type, args.focus_filter)
+    main(args.data_path, args.plot_type, args.focus_filter)
