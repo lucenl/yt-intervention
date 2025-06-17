@@ -15,7 +15,7 @@ MONITOR_URL = "http://gba.cs.ucdavis.edu:5000"
 
 def init_puppet(puppetId, profile_dir):
     puppet = {
-        "driver": YTDriver(profile_dir=profile_dir, use_virtual_display=True),
+        "driver": YTDriver(use_virtual_display=True),
         "puppetId": puppetId,
         "actions": [],
         "start_time": datetime.now()
