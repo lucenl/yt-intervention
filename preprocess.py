@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 
 # Logging setup at module level
-LOCAL_LOG_DIR = "./local_logs"
+LOCAL_LOG_DIR = "./post_local_logs"
 SHARED_DIR = "./shared"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)

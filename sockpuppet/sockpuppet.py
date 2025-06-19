@@ -223,6 +223,109 @@ def intervention(puppet, args):
     end = perf_counter()
     logging.info(f"Intervention completed for puppet {puppet['puppetId']} in {end - intervention_start:.2f} seconds")
 
+def post_intervention(puppet, args):
+    round_num = 31 # Fix this to 31 for post intervention
+
+    intervention_start = perf_counter()
+    logging.info(f"Starting post_intervention (round_{round_num}) for puppet {puppet['puppetId']}")
+    add_action(puppet, "post_intervention_start")
+    
+    focus = args.get("focus", "homepage")
+    intervention_type = args.get("intervention_type", "downrank")
+    
+    
+    # Step 1: Check prerequisites
+    puppet_shared_dir = os.path.join(SHARED_DIR, puppet["puppetId"])
+    if not os.path.exists(puppet_shared_dir):
+        logging.error(f"Shared directory not found for {puppet['puppetId']}, skipping")
+        return
+
+    next_video_file = os.path.join(puppet_shared_dir, 'next_video_30.txt')
+    if not os.path.exists(next_video_file):
+        logging.error(f"Next video file not found for {puppet['puppetId']}, skipping")
+        return
+    
+    # Step 2: Read the next video from the file
+    try: 
+        with open(next_video_file, "r") as f:
+            last_selected_video = f.read().strip()
+        logging.info(f"Last selected video for round 30: {last_selected_video}")
+    except Exception as e:
+        logging.error(f"Failed to read last selected video for {puppet['puppetId']}, skipping")
+        return
+    
+    # Watch the video
+    start = perf_counter()
+    logging.info(f"Post-intervention: Watching video {last_selected_video} from round 30")
+    try:
+        selected_video = Video(None, make_url(last_selected_video))
+        watch(puppet, selected_video, args["duration"])
+        add_action(puppet, "post_intervention_watch", last_selected_video)
+        logging.info(f"Successfully watched video {last_selected_video}")
+    except Exception as e:
+        logging.error(f"Failed to watch video {last_selected_video}: {e}")
+        return
+    logging.info(f"Watching last video took {perf_counter() - start:.2f} seconds")
+    
+    
+    # Step 3: Get final recommendations from post-intervention
+    start = perf_counter()
+    try:
+        logging.info(f"Post-intervention: Getting final {focus} recommendations for round {round_num}")
+        final_recs = get_recommendations(puppet, focus, round_num)
+        
+        # Save recommendations
+        with open(os.path.join(puppet_shared_dir, f"recommendations_{round_num}.txt"), "w") as f:
+            f.write("\n".join(final_recs))
+        
+        add_action(puppet, f"get_post_intervention_recommendations", final_recs)
+        logging.info(f"Collected {len(final_recs)} final recommendations for round {round_num}")
+    
+    except Exception as e:
+        logging.error(f"Failed to get final recommendations for {puppet['puppetId']}: {e}")
+        return
+    logging.info(f"Getting final recommendations took {perf_counter() - start:.2f} seconds")    
+    
+    
+    # Step 4: Process final recomendations for round 31 (only classify)
+    start = perf_counter()
+    try:
+        logging.info(f"Post-intervention: Classify final recommendations for round {round_num}")
+        
+        # Start preprocessing for final round
+        while True:
+            try:
+                logging.info(f"Post-Intervention(): Starting preprocessing for round {round_num}")
+                response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
+                    "puppet_id": puppet["puppetId"],
+                    "round_num": round_num,
+                    "intervention_type": intervention_type,
+                    "focus": focus
+                })
+                logging.info(f"Post-Intervention(): requests for preprocess")
+            except Exception as e:
+                logging.error(f"Could not contact monitor on {MONITOR_URL}: {e}")
+                logging.info(f"Retrying in 5 seconds...")
+                time.sleep(5)
+                continue
+            if response.status_code == 200:
+                break
+            elif response.status_code == 202:
+                time.sleep(2)
+            else:
+                logging.error(f"Failed to start preprocessing for round {round_num}: {response.text}")
+                logging.info(f"Retrying in 2 seconds...")
+                time.sleep(2)
+        logging.info(f"Start preprocess took {perf_counter() - start:.2f} seconds")
+        
+    except Exception as e:   
+        logging.error(f"Failed to preprocess for final recommendations: {e}")
+             
+    add_action(puppet, "post_intervention_end")
+    end = perf_counter()
+    logging.info(f"Post-intervention completed for puppet {puppet['puppetId']} in {end - intervention_start:.2f} seconds")
+
+
 if __name__ == "__main__":
     args = json.loads(sys.argv[1])
     args["outputDir"] = args.get("outputDir", "/output")
@@ -254,7 +357,8 @@ if __name__ == "__main__":
     if steps == "train":
         train(puppet, args)
     elif steps == "intervention":
-        intervention(puppet, args)
+        # intervention(puppet, args)
+        post_intervention(puppet, args)
     elif steps == "combined":
         train(puppet, args)
         intervention(puppet, args)

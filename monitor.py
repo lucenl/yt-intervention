@@ -9,7 +9,7 @@ import pwd
 
 app = Flask(__name__)
 SHARED_DIR = "./shared"
-LOCAL_LOG_DIR = "./local_logs"
+LOCAL_LOG_DIR = "./post_local_logs"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
 os.makedirs(SHARED_DIR, exist_ok=True)

@@ -7,7 +7,7 @@ import redis
 from flask import Flask, request, jsonify
 
 # Logging setup
-LOCAL_LOG_DIR = "./local_logs"
+LOCAL_LOG_DIR = "./post_local_logs"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
 log_file = os.path.join(LOCAL_LOG_DIR, "metadata_service.log")
 logging.basicConfig(

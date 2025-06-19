@@ -11,7 +11,7 @@ import stat
 
 IMAGE_NAME = "lucen/youtube-sock-puppet"
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
-LOGS_DIR = os.path.join(os.getcwd(), "upnext-logs")
+LOGS_DIR = os.path.join(os.getcwd(), "post-logs")
 SHARED_DIR = os.path.join(os.getcwd(), "shared")
 
 NUM_TRAINING_VIDEOS = 110
@@ -44,6 +44,10 @@ def parse_args():
     parser.add_argument("--harmful-percentages", type=int, nargs="+", default=PERCENTAGE_GROUPS, help="Percentage of harmful videos")
     parser.add_argument("--focus", type=str, default="homepage", choices=["homepage", "upnext"], help="Focus for recommendations")
     parser.add_argument('--network', type=str, default='bridge', help='Docker network mode')
+    parser.add_argument("--post", action="store_true", help="Run only post intervention")
+    parser.add_argument("--txt-file", type=str, default="/home/piglet/codebase/yt-intervention/analyze/experiment_stats_successful.txt", help="Run post-intervention on puppets listed in txt file")
+    parser.add_argument("--batch-limit", type=int, default=100, help="Maximum number of puppets to process from batch file")
+    
     return parser.parse_args()
 
 def build_image():
@@ -128,7 +132,7 @@ def spawn_containers(args):
             }
             
             # 1. Ensure the host's shared/<puppet_id> exists and is writable by us:
-            host_shared = os.path.join(os.getcwd(), "shared")  # same as your SHARED_DIR mount
+            host_shared = os.path.join(os.getcwd(), SHARED_DIR)
             puppet_shared_host = os.path.join(host_shared, puppet_id)
             os.makedirs(puppet_shared_host, exist_ok=True)
             os.chmod(puppet_shared_host, 0o777)
@@ -155,17 +159,132 @@ def spawn_containers(args):
             count += 1
             sleep(3)
     logger.info(f"Total containers spawned: {count}")
+
+def spawn_post_containers(args, txt_file, limit):
+    # Read from success puppet txt
+    if not os.path.exists(txt_file):
+        logger.error(f"Puppet ID list file {txt_file} does not exist. Exiting.")
+        return
+    
+    with open(txt_file, 'r') as f:
+        puppet_ids = [line.strip() for line in f if line.strip()]
+    
+    if not puppet_ids:
+        logger.error("No puppet IDs found in the file. Exiting.")
+        return
+    
+    # Limit number of puppets to do post-intervention
+    puppet_ids = puppet_ids[:limit]
+    logger.info(f"Found the first {len(puppet_ids)} puppet IDs, processing first {len(puppet_ids)}")
+    print(f"Preparing to run post-intervention for {len(puppet_ids)} puppets")
+
+
+    print("============DEBUG: Entering spawan post=====================")
+    client = docker.from_env()
+
+    # Read existing puppet config from output directory
+    puppet_dir = os.path.join(OUTPUT_DIR, "puppets")
+    if not os.path.exists(puppet_dir):
+        logger.error(f"Puppet directory {puppet_dir} does not exist. Exiting.")
+
+        return
+    
+    puppet_files = [f for f in os.listdir(puppet_dir) if f.endswith('.json')]
+    if not puppet_files:
+        logger.error("No puppet configuration files found. Exiting.")
+        return
+    
+    logger.info(f"Found {len(puppet_files)} puppet configuration files.")
+    
+    count = 0
+    print(f"Preparing to run {puppet_files} experiments with steps={args.steps}")
+
+    for puppet_file in puppet_files:
+        print(f"============Processing {puppet_file}=====================")
+        while max_containers_reached(client, args.max_containers):
+            logger.info("Max containers reached. Sleeping...")
+            sleep(args.sleep_duration)
+        
+        puppet_path = os.path.join(puppet_dir, puppet_file)
+        try:
+            # Load puppet
+            try:
+                with open(puppet_path, 'r') as f:
+                    old_puppet_args = json.load(f)
+            except Exception as e:
+                print("==============Load puppet fails=============")
+            
+            old_args = old_puppet_args.get("args", {})
+            print(f"args: {old_args}")
+            puppet_id = old_args.get("puppetId")
+            
+            print(f"============Processing puppet{puppet_id}=====================")
+            puppet_args = {
+                "puppetId": puppet_id,
+                "duration": old_args.get("duration", WATCH_DURATION),
+                "description": old_args.get("description"),
+                "harmful_percentage": old_args.get("harmful_percentage"),
+                "outputDir": old_args.get("outputDir"),
+                "training": old_args.get("training"),
+                "trainingN": old_args.get("trainingN"),
+                "steps": args.steps,
+                "rounds": old_args.get("rounds"),
+                "focus": old_args.get("focus"),
+                "intervention_type": old_args.get("intervention_type")
+            }
+
+            # Ensure the host's shared/<puppet_id> exists (should already exist)
+            puppet_shared_host = os.path.join(SHARED_DIR, puppet_id)
+            print(f"=============shared_dir is {puppet_shared_host}==============")
+            if not os.path.exists(puppet_shared_host):
+                logger.error(f"Missing shared directory for {puppet_id}")
+                print("==============Missing  shared dir ==============")
+                continue
+            
+            if not args.simulate:
+                print(puppet_args["puppetId"])
+                logger.info(f"Spawning puppet {puppet_args['puppetId']} with steps {args.steps}, intervention_type {puppet_args['intervention_type']}...")
+                command = ["python", "sockpuppet.py", json.dumps(puppet_args)]
+                try:
+                    container = client.containers.run(
+                        IMAGE_NAME,
+                        command,
+                        volumes=get_mount_volumes(),
+                        shm_size="512M",
+                        remove=True,
+                        detach=True,
+                        network=args.network,
+                        extra_hosts={"host.docker.internal": "host-gateway"}
+                    )
+                    logger.info(f"Started container {container.id} for puppet {puppet_id}")
+                except Exception as e:
+                    logger.error(f"Failed to start container for puppet {puppet_id}: {str(e)}")
+
+            count += 1
+            sleep(3)
+            
+        except Exception as e:
+            logger.error(f"Error processing puppet file {puppet_file}: {str(e)}")
+            return 
+        
+    logger.info(f"Total containers spawned: {count}")
+    
+    
+
 def main():
     args = parse_args()
 
     if args.build:
         build_image()
 
-    if args.run:
+    if args.post:
+        spawn_post_containers(args, args.txt_file, args.batch_limit)
+
+    elif args.run:
         spawn_containers(args)
 
     if not args.build and not args.run:
         logger.info("No operation specified. Use --build or --run.")
 
-if __name__ == "__main__":
+if __name__ == "__main__":      
     main()
