@@ -20,7 +20,7 @@ WATCH_DURATION = 30
 PERCENTAGE_GROUPS = [0, 25, 50]
 PUPPETS_PER_GROUP = 1000
 
-ROUNDS = 30
+ROUNDS = 31
 
 # Setup logging
 logging.basicConfig(
