@@ -124,6 +124,7 @@ def intervention(puppet, args):
             try:
                 logging.info(f"Intervention(): Starting preprocessing for round {round_num}")
                 response = requests.post(f"{MONITOR_URL}/start_preprocess", json={
+                    "target_rounds": rounds,
                     "puppet_id": puppet["puppetId"],
                     "round_num": round_num,
                     "intervention_type": intervention_type,
@@ -144,6 +145,11 @@ def intervention(puppet, args):
                 logging.info(f"Retrying in 2 seconds...")
                 time.sleep(2)
         logging.info(f"Start preprocess took {perf_counter() - start:.2f} seconds")
+        
+        if round_num == rounds:
+            logging.info(f"Last round {round_num} reached, skipping remaining steps...")
+            add_action(puppet, f"round_{round_num}_end")
+            break
         
         # Wait for preprocessing to complete and get recommendations
         start = perf_counter()

@@ -9,7 +9,7 @@ import pwd
 
 app = Flask(__name__)
 SHARED_DIR = "./shared"
-LOCAL_LOG_DIR = "./post_local_logs"
+LOCAL_LOG_DIR = "./local_logs"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
 os.makedirs(SHARED_DIR, exist_ok=True)
@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 
 active_processes = {}
 
-def run_preprocess(puppet_id, round_num, intervention_type, focus, training=None):
+def run_preprocess(target_rounds, puppet_id, round_num, intervention_type, focus, training=None):
     """
     Run preprocess.py to generate recommendations and next video.
     """
     logger.info(f"run_preprocess() for round {round_num}")
-    cmd = f"python preprocess.py {puppet_id} {round_num} {intervention_type} {focus}"
+    cmd = f"python preprocess.py {target_rounds} {puppet_id} {round_num} {intervention_type} {focus}"
     if training:
         cmd += f" --training {','.join(training)}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -43,6 +43,7 @@ def run_preprocess(puppet_id, round_num, intervention_type, focus, training=None
 def start_preprocess():
     global active_processes
     data = request.get_json()
+    target_rounds = data.get('target_rounds')
     puppet_id = data.get('puppet_id')
     round_num = data.get('round_num')
     intervention_type = data.get('intervention_type', 'downrank')
@@ -50,7 +51,7 @@ def start_preprocess():
     training = data.get('training')
 
     logger.info(f"Received start_preprocess request for {puppet_id}, round {round_num}")
-    process = Process(target=run_preprocess, args=(puppet_id, round_num, intervention_type, focus, training))
+    process = Process(target=run_preprocess, args=(target_rounds, puppet_id, round_num, intervention_type, focus, training))
     logger.info(f"start_preprocess() for {puppet_id}, round {round_num}")
     process.start()
     key = f"{puppet_id}_{round_num}"

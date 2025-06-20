@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 
 # Logging setup at module level
-LOCAL_LOG_DIR = "./post_local_logs"
+LOCAL_LOG_DIR = "./local_logs"
 SHARED_DIR = "./shared"
 EXPERIMENT_DATA_DIR = "./experiment_data"
 os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
@@ -225,21 +225,31 @@ def select_video_decay_weighted(modified_video_ids, aligned_scores):
     logging.info(f"Selected video (decay-weighted): {selected_video_id} at index {selected_index} with weights {normalized_weights}")
     return selected_video_id, selected_index
 
-def save_experiment_data(puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id):
+def save_experiment_data(target_rounds, puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id):
     """Save experiment data to a JSON file."""
     experiment_file = os.path.join(EXPERIMENT_DATA_DIR, puppet_id, f"round_{round_num}.json")
     os.makedirs(os.path.dirname(experiment_file), exist_ok=True)
     num_harmful = sum(1 for score in harm_scores if score > harm_threshold)
-    experiment_data = {
-        "round": round_num,
-        "recommendations": video_ids,
-        "harm_scores": harm_scores,
-        "categories": categories,
-        "modified_recommendations": modified_video_ids,
-        "selected_video": selected_video_id,
-        "num_harmful_videos": num_harmful,
-        "harm_category_counts": {cat: categories.count(cat) for cat in ['HH', 'SXL', 'PH']},
-    }
+    if round_num < target_rounds:
+        experiment_data = {
+            "round": round_num,
+            "recommendations": video_ids,
+            "harm_scores": harm_scores,
+            "categories": categories,
+            "modified_recommendations": modified_video_ids,
+            "selected_video": selected_video_id,
+            "num_harmful_videos": num_harmful,
+            "harm_category_counts": {cat: categories.count(cat) for cat in ['HH', 'SXL', 'PH']},
+        }
+    else:
+        experiment_data = {
+            "round": round_num,
+            "recommendations": video_ids,
+            "harm_scores": harm_scores,
+            "categories": categories,
+            "num_harmful_videos": num_harmful,
+            "harm_category_counts": {cat: categories.count(cat) for cat in ['HH', 'SXL', 'PH']},
+        }
     with open(experiment_file, "w") as f:
         json.dump(experiment_data, f, indent=4)
     logging.info(f"Saved experiment data to {experiment_file}")
@@ -258,7 +268,7 @@ def signal_completion(puppet_shared_dir, round_num):
         f.write("Done")
     logging.info(f"Signaled completion with {done_file}")
 
-def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
+def preprocess(target_rounds, puppet_id, round_num, intervention_type, harm_threshold=0.8):
     """Main preprocessing function coordinating the pipeline."""
     global _file_handler
     if _file_handler:
@@ -286,34 +296,41 @@ def preprocess(puppet_id, round_num, intervention_type, harm_threshold=0.8):
     categories, harmful_indices = categorize_harmful_videos(metadata, harm_scores, harm_threshold, video_ids)
     logger.info(f"Preprocess(): Classified video for round {round_num}")
     
-    # Apply intervention
-    if intervention_type == "downrank":
-        modified_video_ids, aligned_scores = apply_downrank_intervention(video_ids, harm_scores)
-    elif intervention_type == "replace":
-        # Load or initialize harmless pool
-        harmless_pool = load_or_initialize_harmless_pool(puppet_id)
-        modified_video_ids, aligned_scores, updated_pool = apply_replace_intervention(video_ids, harm_scores, harmful_indices, harmless_pool, harm_threshold)
-        save_harmless_pool(puppet_id, updated_pool)  # Persist updated pool
-    elif intervention_type == "none":  # none
-        modified_video_ids, aligned_scores = apply_no_intervention(video_ids)
+    modified_video_ids = video_ids.copy()  
+    selected_video_id = None  
     
-    logger.info(f"Preprocess(): Finished intervention for round {round_num}")
+    if round_num < target_rounds:
+        # Apply intervention
+        if intervention_type == "downrank":
+            modified_video_ids, aligned_scores = apply_downrank_intervention(video_ids, harm_scores)
+        elif intervention_type == "replace":
+            # Load or initialize harmless pool
+            harmless_pool = load_or_initialize_harmless_pool(puppet_id)
+            modified_video_ids, aligned_scores, updated_pool = apply_replace_intervention(video_ids, harm_scores, harmful_indices, harmless_pool, harm_threshold)
+            save_harmless_pool(puppet_id, updated_pool)  # Persist updated pool
+        elif intervention_type == "none":  # none
+            modified_video_ids, aligned_scores = apply_no_intervention(video_ids)
+        
+        logger.info(f"Preprocess(): Finished intervention for round {round_num}")
 
-    # Select video
-    selected_video_id, _ = select_video_decay_weighted(modified_video_ids, aligned_scores)
-    logger.info(f"Preprocess(): Finished selection for round {round_num}")
-    
-    # Save results
-    save_experiment_data(puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id)
+        # Select video
+        selected_video_id, _ = select_video_decay_weighted(modified_video_ids, aligned_scores)
+        logger.info(f"Preprocess(): Finished selection for round {round_num}")
+        
+    # Save results 
+    save_experiment_data(target_rounds, puppet_id, round_num, video_ids, harm_scores, harm_threshold, categories, modified_video_ids, selected_video_id)
     logger.info(f"Preprocess(): Save experiemnets results for round {round_num}")
-    save_next_video(puppet_shared_dir, round_num, selected_video_id)
-    logger.info(f"Preprocess(): save next video for round {round_num}")
+    if round_num < target_rounds:
+        # Save next video ID for the next round
+        save_next_video(puppet_shared_dir, round_num, selected_video_id)
+        logger.info(f"Preprocess(): save next video for round {round_num}")
     signal_completion(puppet_shared_dir, round_num)
     logger.info(f"Preprocess(): Signaled completion for round {round_num}")
 
 if __name__ == "__main__":
     import sys
-    puppet_id = sys.argv[1]
-    round_num = int(sys.argv[2])
-    intervention_type = sys.argv[3]
-    preprocess(puppet_id, round_num, intervention_type)
+    target_rounds = int(sys.argv[1])
+    puppet_id = sys.argv[2]
+    round_num = int(sys.argv[3])
+    intervention_type = sys.argv[4]
+    preprocess(target_rounds, puppet_id, round_num, intervention_type)

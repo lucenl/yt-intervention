@@ -11,16 +11,16 @@ import stat
 
 IMAGE_NAME = "lucen/youtube-sock-puppet"
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
-LOGS_DIR = os.path.join(os.getcwd(), "post-logs")
+LOGS_DIR = os.path.join(os.getcwd(), "logs")
 SHARED_DIR = os.path.join(os.getcwd(), "shared")
 
 NUM_TRAINING_VIDEOS = 110
 WATCH_DURATION = 30
 
 PERCENTAGE_GROUPS = [25]
-PUPPETS_PER_GROUP = 30
+PUPPETS_PER_GROUP = 1000
 
-ROUNDS = 30
+ROUNDS = 31
 
 # Setup logging
 logging.basicConfig(
