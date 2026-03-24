@@ -1,10 +1,13 @@
 # log files
+.DS_Store
 *.log
 *.png
 *.csv
 *.json
 *.txt
 *.xlsx
+!requirements.txt
+!sockpuppet/requirements.txt
 
 # Add this line for Python cache:
 __pycache__/
