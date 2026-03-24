@@ -23,7 +23,7 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logging.getLogger().addHandler(console_handler)
 
 
-KEYS_ENV = 'AIzaSyBGdcHykAwbhEND9MtC-3ZAYhiXXyfV1As, AIzaSyCBkf4tEdjaUzczm6cWcolDoZhzD6IQXQg, AIzaSyAW88VfM3okyJyv3y5AqsFAWWaG7VoU7RA'
+YOUTUBE_API_KEYS_ENV = "YOUTUBE_API_KEYS"
 
 
 class MetadataExtractor:
@@ -33,11 +33,13 @@ class MetadataExtractor:
     """
 
     def __init__(self, redis_url='redis://localhost:6379/0', api_keys=None):
-        # Read API keys from env or parameter (comma-separated)
-        keys_env = KEYS_ENV
+        # Read API keys from the explicit parameter or environment variable.
+        keys_env = api_keys or os.getenv(YOUTUBE_API_KEYS_ENV, "")
         self.api_keys = [k.strip() for k in keys_env.split(',') if k.strip()]
         if not self.api_keys:
-            raise ValueError('Provide at least one YouTube API key via YOUTUBE_API_KEYS')
+            raise ValueError(
+                f"Provide at least one YouTube API key via the {YOUTUBE_API_KEYS_ENV} environment variable"
+            )
         self._key_index = 0
 
         # Redis connection

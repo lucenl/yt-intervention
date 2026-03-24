@@ -1,0 +1,23 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: infra/control-plane.Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    ports:
+      - "5000:5000"
+      - "6000:6000"
+      - "9000:9000"
+      - "6379:6379"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: >
+      sh -lc "
+      redis-server --daemonize yes &&
+      python metadata_extractor.py &
+      python roberta_classifier.py &
+      python monitor.py &
+      wait
+      "

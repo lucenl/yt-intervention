@@ -1,0 +1,16 @@
+docker
+flask
+matplotlib
+numpy
+pandas
+PyVirtualDisplay
+redis
+requests
+scipy
+seaborn
+selenium>=4.6.0
+torch
+transformers
+datasets
+wandb
+git+https://github.com/Haroon96/YouTube-Driver.git
