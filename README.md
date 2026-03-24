@@ -75,30 +75,22 @@ pip install -r sockpuppet/requirements.txt
 
 This repository does not include the RoBERTa checkpoints.
 
-Place the model files in the following locations:
+The released model weights are hosted on Hugging Face:
 
-```text
-models/
-├── binary/
-│   ├── config.json
-│   ├── model.safetensors
-│   ├── merges.txt
-│   ├── special_tokens_map.json
-│   ├── tokenizer_config.json
-│   └── vocab.json
-└── multiclass/
-    ├── config.json
-    ├── model.safetensors
-    ├── merges.txt
-    ├── special_tokens_map.json
-    ├── tokenizer_config.json
-    └── vocab.json
-```
+- Binary classifier: [xiaoman77/yt-intervention-binary](https://huggingface.co/xiaoman77/yt-intervention-binary)
+- Multiclass classifier: [xiaoman77/yt-intervention-multiclass](https://huggingface.co/xiaoman77/yt-intervention-multiclass)
 
-By default, `roberta_classifier.py` looks for:
+To run the classifier service locally, download the model files and place them under:
 
 - `models/binary`
 - `models/multiclass`
+
+Example:
+
+```bash
+huggingface-cli download xiaoman77/yt-intervention-binary --local-dir models/binary
+huggingface-cli download xiaoman77/yt-intervention-multiclass --local-dir models/multiclass
+```
 
 ## Configuration
 
