@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 import wandb
 from scipy.special import softmax
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[1]
+MODELS_DIR = REPO_ROOT / "models"
 
 # 0) W&B login
 wandb.login()
@@ -25,9 +30,9 @@ original_data = {
 
 # 2) Binary Classification
 # Load binary model and tokenizer
-BINARY_MODEL_DIR = 'binary'
-binary_model = RobertaForSequenceClassification.from_pretrained(BINARY_MODEL_DIR)
-binary_tokenizer = RobertaTokenizer.from_pretrained(BINARY_MODEL_DIR)
+BINARY_MODEL_DIR = MODELS_DIR / "binary"
+binary_model = RobertaForSequenceClassification.from_pretrained(str(BINARY_MODEL_DIR))
+binary_tokenizer = RobertaTokenizer.from_pretrained(str(BINARY_MODEL_DIR))
 
 MAX_LEN = binary_tokenizer.model_max_length
 THRESHOLD = 0.8
@@ -57,9 +62,9 @@ harmful_indices = np.where(binary_preds == 1)[0]
 harmful_dataset = test_dataset.select(harmful_indices)
 
 # Load multiclass model and tokenizer
-MULTICLASS_MODEL_DIR = 'multiclass'
-multiclass_model = RobertaForSequenceClassification.from_pretrained(MULTICLASS_MODEL_DIR)
-multiclass_tokenizer = RobertaTokenizer.from_pretrained(MULTICLASS_MODEL_DIR)
+MULTICLASS_MODEL_DIR = MODELS_DIR / "multiclass"
+multiclass_model = RobertaForSequenceClassification.from_pretrained(str(MULTICLASS_MODEL_DIR))
+multiclass_tokenizer = RobertaTokenizer.from_pretrained(str(MULTICLASS_MODEL_DIR))
 
 # Tokenize for multiclass classification
 def multiclass_tokenize_fn(examples):

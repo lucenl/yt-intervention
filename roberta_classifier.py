@@ -16,6 +16,12 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset
 from typing import List, Optional
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+MODELS_DIR = REPO_ROOT / "models"
+BINARY_MODEL_DIR = MODELS_DIR / "binary"
+MULTICLASS_MODEL_DIR = MODELS_DIR / "multiclass"
 
 class RoBERTaTextDataset(Dataset):
     """
@@ -193,8 +199,8 @@ class MulticlassClassifier:
 
 if __name__ == '__main__':
 
-    roberta_classifier = RoBERTaClassifier(model_path="./models/binary")
-    multiclass_classifier = MulticlassClassifier(model_path="./models/multiclass")
+    roberta_classifier = RoBERTaClassifier(model_path=str(BINARY_MODEL_DIR))
+    multiclass_classifier = MulticlassClassifier(model_path=str(MULTICLASS_MODEL_DIR))
 
     from flask import Flask, request
     app = Flask(__name__)
