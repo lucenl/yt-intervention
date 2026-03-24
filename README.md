@@ -1,14 +1,41 @@
 # YouTube Intervention
 
-This repository contains the code for running a YouTube sock-puppet experiment pipeline with automated intervention, metadata collection, and content classification.
+A runtime pipeline for YouTube sock-puppet experiments with automated intervention, metadata retrieval, and RoBERTa-based content classification.
+
+> Model checkpoints are hosted on Hugging Face and are not bundled in this repository.
 
 The system is designed to:
 
 - create and train automated YouTube accounts on curated watch histories,
 - collect homepage or up-next recommendations over repeated rounds,
-- classify recommended videos with RoBERTa-based harmful-content models,
+- classify recommended videos with binary and multiclass RoBERTa models,
 - apply intervention strategies such as `downrank`, `replace`, or `none`,
 - save round-by-round experiment outputs for downstream analysis.
+
+## At a Glance
+
+| Component | Purpose |
+|---|---|
+| `docker-api.py` | Launches and orchestrates sock-puppet runs |
+| `sockpuppet/sockpuppet.py` | Drives YouTube viewing behavior and recommendation collection |
+| `monitor.py` | Coordinates round-level preprocessing |
+| `preprocess.py` | Scores recommendations and applies interventions |
+| `metadata_extractor.py` | Fetches and caches metadata in Redis |
+| `roberta_classifier.py` | Serves binary and multiclass harmful-content models |
+
+## Workflow
+
+```mermaid
+flowchart LR
+    A["docker-api.py"] --> B["sockpuppet/sockpuppet.py"]
+    B --> C["monitor.py"]
+    C --> D["preprocess.py"]
+    D --> E["metadata_extractor.py"]
+    D --> F["roberta_classifier.py"]
+    E --> G["Redis cache"]
+    D --> H["next_video + round outputs"]
+    H --> B
+```
 
 ## What This Repository Does
 
@@ -75,30 +102,24 @@ pip install -r sockpuppet/requirements.txt
 
 This repository does not include the RoBERTa checkpoints.
 
-Place the model files in the following locations:
+The released model weights are hosted on Hugging Face:
 
-```text
-models/
-├── binary/
-│   ├── config.json
-│   ├── model.safetensors
-│   ├── merges.txt
-│   ├── special_tokens_map.json
-│   ├── tokenizer_config.json
-│   └── vocab.json
-└── multiclass/
-    ├── config.json
-    ├── model.safetensors
-    ├── merges.txt
-    ├── special_tokens_map.json
-    ├── tokenizer_config.json
-    └── vocab.json
-```
+- Binary classifier: [xiaoman77/yt-intervention-binary](https://huggingface.co/xiaoman77/yt-intervention-binary)
+- Multiclass classifier: [xiaoman77/yt-intervention-multiclass](https://huggingface.co/xiaoman77/yt-intervention-multiclass)
 
-By default, `roberta_classifier.py` looks for:
+To run the classifier service locally, download the model files and place them under:
 
 - `models/binary`
 - `models/multiclass`
+
+Example:
+
+```bash
+huggingface-cli download xiaoman77/yt-intervention-binary --local-dir models/binary
+huggingface-cli download xiaoman77/yt-intervention-multiclass --local-dir models/multiclass
+```
+
+The code expects these directories locally at runtime, so the Hugging Face checkpoints should be downloaded into the paths above before starting the classifier service.
 
 ## Configuration
 
@@ -193,6 +214,16 @@ python docker-api.py --run --steps combined
 
 This Compose setup is optional and does not replace the manual workflow.
 
+### Minimal Manual Order
+
+If you only need the shortest startup order, the runtime sequence is:
+
+1. Start Redis
+2. Start `metadata_extractor.py`
+3. Start `roberta_classifier.py`
+4. Start `monitor.py`
+5. Run `docker-api.py`
+
 ## Workflow
 
 The runtime workflow is:
@@ -245,6 +276,18 @@ The current runtime supports:
 - The training pools are currently read from `data/training/harmful.csv` and `data/training/non_harmful.csv`.
 - Model checkpoints must be supplied separately.
 - Service endpoints are currently configured in code and should be kept consistent across the local environment.
+
+## Current Scope
+
+This repository is intended to provide the runtime pipeline for the experiment rather than the full paper artifact package.
+
+It currently includes:
+
+- the sock-puppet runtime,
+- intervention and preprocessing services,
+- metadata and classifier services,
+- training video pools,
+- optional local orchestration with Docker Compose.
 
 ## Notes For Public Release
 
