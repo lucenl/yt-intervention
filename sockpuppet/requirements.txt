@@ -1,0 +1,6 @@
+numpy
+pandas
+PyVirtualDisplay
+requests
+selenium>=4.6.0
+git+https://github.com/Haroon96/YouTube-Driver.git
